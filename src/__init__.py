@@ -1,0 +1,3 @@
+"""
+Velero Manager source package.
+"""

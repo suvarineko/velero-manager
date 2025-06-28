@@ -1,0 +1,388 @@
+# Default values for velero-manager.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Application configuration
+app:
+  # Application log level (DEBUG, INFO, WARNING, ERROR)
+  logLevel: "INFO"
+  # Enable development mode
+  devMode: false
+  # Application environment (development, staging, production)
+  environment: "production"
+  # Additional command line arguments for streamlit
+  extraArgs: []
+  # Additional environment variables
+  extraEnv: {}
+    # CUSTOM_VAR: "value"
+  # Environment variables from configmaps/secrets
+  extraEnvFrom: []
+    # - configMapRef:
+    #     name: my-configmap
+    # - secretRef:
+    #     name: my-secret
+
+# Container image configuration
+image:
+  # Image repository
+  repository: registry.apps.k8s.ose-prod.solution.sbt/r4c-development/velero-manager
+  # Image pull policy
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion
+  tag: "v1.0.0"
+
+# Image pull secrets for private registries
+imagePullSecrets: []
+  # - name: myregistrykey
+
+# Override the name of the chart
+nameOverride: ""
+# Override the full name of the resources
+fullnameOverride: ""
+
+# Number of replicas
+replicaCount: 1
+
+# Service account configuration
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+  # Image pull secrets for the service account
+  imagePullSecrets: []
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+  # Cluster role configuration
+  clusterRole:
+    # Name of the cluster role (if not set, uses fullname template)
+    name: ""
+    # Annotations for the cluster role
+    annotations: {}
+    # Additional rules to add to the cluster role
+    extraRules: []
+      # - apiGroups: [""]
+      #   resources: ["pods"]
+      #   verbs: ["get", "list"]
+  # Cluster role binding configuration
+  clusterRoleBinding:
+    # Name of the cluster role binding (if not set, uses fullname template)
+    name: ""
+    # Annotations for the cluster role binding
+    annotations: {}
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# Service configuration
+service:
+  # Service type
+  type: ClusterIP
+  # Service port
+  port: 80
+  # Target port on the container
+  targetPort: 4180
+  # Node port (for NodePort and LoadBalancer types)
+  nodePort: ""
+  # Cluster IP (for ClusterIP type)
+  clusterIP: ""
+  # Load balancer IP (for LoadBalancer type)
+  loadBalancerIP: ""
+  # Load balancer source ranges
+  loadBalancerSourceRanges: []
+  # External IPs
+  externalIPs: []
+  # Session affinity
+  sessionAffinity: ""
+  # Session affinity config
+  sessionAffinityConfig: {}
+  # Service annotations
+  annotations: {}
+  # Additional ports to expose
+  extraPorts: []
+    # - name: metrics
+    #   port: 9090
+    #   targetPort: 9090
+    #   protocol: TCP
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/ssl-redirect: true
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: velero-manager.apps.k8s.r4c-test.solution.sbt
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: velero-manager-tls
+      hosts:
+        - velero-manager.apps.k8s.r4c-test.solution.sbt
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Autoscaling configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Health check probes configuration
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Persistence configuration
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+
+# ConfigMap configuration
+configMap:
+  # Additional annotations for the configmap
+  annotations: {}
+  # Additional data to include in the configmap
+  extraData: {}
+    # custom-config.yaml: |
+    #   key: value
+
+# Velero configuration
+velero:
+  # Velero namespace
+  namespace: "velero"
+  # Default backup TTL
+  defaultBackupTTL: "720h"
+  # Default backup storage location
+  backupStorageLocation: "default"
+  # Additional Velero configuration
+  extraConfig: {}
+    # restore_timeout: "1h"
+    # backup_timeout: "4h"
+
+# Kubernetes client configuration
+k8s:
+  # API request timeout (seconds)
+  timeout: 30
+  # Number of retry attempts for failed requests
+  retryAttempts: 3
+  # Cache TTL in seconds
+  cacheTTL: 300
+  # Enable fast discovery mode (parallel requests)
+  fastDiscovery: true
+  # Maximum number of parallel requests
+  maxParallelRequests: 5
+  # Include custom resource definitions in discovery
+  includeCRDResources: true
+
+# Authentication configuration
+auth:
+  # Session timeout in seconds
+  sessionTimeout: 3600
+  # Admin permission threshold (percentage)
+  adminThreshold: 0.6
+  # Additional authentication configuration
+  extraConfig: {}
+    # oauth_timeout: 300
+
+# Streamlit theme configuration
+streamlit:
+  theme:
+    primaryColor: "#FF6B6B"
+    backgroundColor: "#FFFFFF"
+    secondaryBackgroundColor: "#F0F2F6"
+    textColor: "#262730"
+    font: "sans serif"
+
+# Sidecar container configuration
+sidecar:
+  # Enable sidecar container
+  enabled: true
+  # Sidecar container name
+  name: "oauth-proxy"
+  # Sidecar image configuration
+  image:
+    repository: "registry.apps.k8s.ose-prod.solution.sbt/r4c-development/oauth-proxy"
+    tag: "v4.13-17"
+    pullPolicy: "IfNotPresent"
+  # Sidecar command
+  command: []
+    # - /bin/sh
+    # - -c
+  # Sidecar arguments
+  args:
+    - '-provider=openshift'
+    - '-http-address=:4180'
+    - '-https-address=:3001'
+    - '-email-domain=*'
+    - '-upstream=http://127.0.0.1:8501'
+    - '-client-id=kubernetes-console'
+    - '-client-secret=hlW2pGGraHDuMAZ4qFEKg2fUHHxr8acDEgDEcIg7RX0U7A9'
+    - '-cookie-secret=VXNSZ1FqMXFId2YwWWt3UlVTUjFXQT09'
+    - '-openshift-ca=/etc/tls/ca.crt'
+    - '-upstream-ca=/etc/tls/ca.crt'
+    - '-ssl-insecure-skip-verify=true'
+    - '-request-logging'
+    - '-cookie-name=openshift-session-token'
+    - '-cookie-domain=apps.k8s.r4c-test.solution.sbt'
+    - '-tls-cert=/etc/tls/tls.crt'
+    - '-tls-key=/etc/tls/tls.key'
+    - '-oauth-issuer-hostname=uniapi.apps.k8s.r4c-test.solution.sbt'
+    - '-pass-access-token=true'
+    - '-pass-auth-header=true'
+    - '-pass-raw-access-token=true'
+    - '-pass-user-headers=true'
+    - '-openshift-delegate-urls={"/":{}}'
+    - '-openshift-sar={"verb":"get","resource":"namespaces"}'
+    # - while true; do echo hello; sleep 10; done
+  # Sidecar environment variables
+  env: {}
+    # SIDECAR_ENV: "value"
+  # Sidecar ports
+  ports:
+    - name: oauth
+      containerPort: 4180
+      protocol: TCP
+    # - name: metrics
+    #   containerPort: 9090
+    #   protocol: TCP
+  # Sidecar resource limits and requests
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 50m
+    #   memory: 64Mi
+  # Sidecar security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+  # Sidecar volume mounts
+  volumeMounts:
+    - name: serving-cert
+      mountPath: /etc/tls
+    # - name: shared-data
+    #   mountPath: /shared
+
+# Additional volumes
+extraVolumes:
+  - name: serving-cert
+    secret:
+      secretName: velero-manager-tls
+      defaultMode: 420
+  # - name: shared-data
+  #   emptyDir: {}
+
+# Additional volume mounts for the main container
+extraVolumeMounts: []
+  # - name: shared-data
+  #   mountPath: /app/shared
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Network policy
+networkPolicy:
+  enabled: false
+  # Ingress rules
+  ingress: []
+    # - from:
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         name: monitoring
+    #   ports:
+    #   - protocol: TCP
+    #     port: 8501
+  # Egress rules
+  egress: []
+    # - to: []
+    #   ports:
+    #   - protocol: TCP
+    #     port: 443
+
+# Monitoring configuration
+monitoring:
+  # Enable ServiceMonitor for Prometheus
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    labels: {}
+    interval: "30s"
+    path: "/metrics"
+    port: "http"
+
+# Extra labels to add to all resources
+extraLabels: {}
+
+# Extra annotations to add to all resources
+extraAnnotations: {}

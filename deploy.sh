@@ -1,0 +1,2 @@
+docker build --platform linux/amd64 -t registry.apps.k8s.ose-prod.solution.sbt/r4c-development/velero-manager:v1.0.0-$(git rev-parse --short HEAD) -f Dockerfile .
+# helm upgrade --install velero-manager ./ --create-namespace -n velero-manager -f values.yaml --set 

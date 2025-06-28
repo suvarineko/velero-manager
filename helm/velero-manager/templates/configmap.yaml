@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "velero-manager.fullname" . }}
+  labels:
+    {{- include "velero-manager.labels" . | nindent 4 }}
+  {{- with .Values.configMap.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  # Application configuration
+  app.yaml: |
+    app:
+      name: {{ include "velero-manager.fullname" . }}
+      version: {{ .Chart.AppVersion | quote }}
+      log_level: {{ .Values.app.logLevel | quote }}
+      dev_mode: {{ .Values.app.devMode }}
+      
+    # Velero configuration
+    velero:
+      namespace: {{ .Values.velero.namespace | quote }}
+      default_backup_ttl: {{ .Values.velero.defaultBackupTTL | quote }}
+      backup_storage_location: {{ .Values.velero.backupStorageLocation | quote }}
+      {{- if .Values.velero.extraConfig }}
+      {{- toYaml .Values.velero.extraConfig | nindent 6 }}
+      {{- end }}
+    
+    # Kubernetes client configuration
+    kubernetes:
+      timeout: {{ .Values.k8s.timeout }}
+      retry_attempts: {{ .Values.k8s.retryAttempts }}
+      cache_ttl: {{ .Values.k8s.cacheTTL }}
+      fast_discovery: {{ .Values.k8s.fastDiscovery }}
+      max_parallel_requests: {{ .Values.k8s.maxParallelRequests }}
+      include_crd_resources: {{ .Values.k8s.includeCRDResources }}
+    
+    # Authentication configuration
+    auth:
+      session_timeout: {{ .Values.auth.sessionTimeout }}
+      admin_threshold: {{ .Values.auth.adminThreshold }}
+      {{- if .Values.auth.extraConfig }}
+      {{- toYaml .Values.auth.extraConfig | nindent 6 }}
+      {{- end }}
+  
+  # Streamlit configuration
+  streamlit-config.toml: |
+    [server]
+    port = {{ .Values.service.targetPort }}
+    address = "0.0.0.0"
+    headless = true
+    enableCORS = false
+    enableXsrfProtection = false
+    enableWebsocketCompression = false
+    
+    [logger]
+    level = "{{ .Values.app.logLevel }}"
+    
+    [browser]
+    gatherUsageStats = false
+    
+    [theme]
+    primaryColor = "{{ .Values.streamlit.theme.primaryColor | default "#FF6B6B" }}"
+    backgroundColor = "{{ .Values.streamlit.theme.backgroundColor | default "#FFFFFF" }}"
+    secondaryBackgroundColor = "{{ .Values.streamlit.theme.secondaryBackgroundColor | default "#F0F2F6" }}"
+    textColor = "{{ .Values.streamlit.theme.textColor | default "#262730" }}"
+    font = "{{ .Values.streamlit.theme.font | default "sans serif" }}"
+  
+  {{- if .Values.configMap.extraData }}
+  # Additional configuration files
+  {{- range $key, $value := .Values.configMap.extraData }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  
+  # Environment specific overrides
+  {{- if eq .Values.app.environment "development" }}
+  development.yaml: |
+    app:
+      dev_mode: true
+      log_level: "DEBUG"
+    kubernetes:
+      timeout: 60
+      retry_attempts: 2
+  {{- else if eq .Values.app.environment "production" }}
+  production.yaml: |
+    app:
+      dev_mode: false
+      log_level: "INFO"
+    kubernetes:
+      timeout: 30
+      retry_attempts: 3
+      cache_ttl: 600
+  {{- end }}

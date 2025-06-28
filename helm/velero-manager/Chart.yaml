@@ -1,0 +1,25 @@
+apiVersion: v2
+name: velero-manager
+description: A Helm chart for deploying Velero Manager - a Streamlit-based web interface for managing Velero backups
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+home: https://github.com/your-org/velero-manager
+sources:
+  - https://github.com/your-org/velero-manager
+
+maintainers:
+  - name: Velero Manager Team
+    email: team@example.com
+
+keywords:
+  - velero
+  - backup
+  - kubernetes
+  - streamlit
+  - disaster-recovery
+
+annotations:
+  category: Backup
+  licenses: Apache-2.0
