@@ -96,16 +96,10 @@ RUN set -eux; \
     # Optimization: Pre-compile Python bytecode for faster startup
     python -m compileall -b /root/.local/lib/python3.11/site-packages/; \
     \
-    # Remove source .py files where .pyc exists to save space
-    find /root/.local/lib/python3.11/site-packages/ -name "*.py" -type f \
-        -exec sh -c 'test -f "${1%%.py}.pyc" && rm "$1"' _ {} \; 2>/dev/null || true; \
-    \
-    # Remove unnecessary files to reduce size
-    find /root/.local -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true; \
+    # Conservative cleanup to maintain compatibility
     find /root/.local -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true; \
     find /root/.local -type d -name "test" -exec rm -rf {} + 2>/dev/null || true; \
-    find /root/.local -name "*.dist-info" -type d -exec find {} -name "RECORD" -delete \; 2>/dev/null || true; \
-    find /root/.local -name "*.egg-info" -type d -exec rm -rf {} + 2>/dev/null || true; \
+    # Keep dist-info and egg-info for package integrity
     \
     # Clean up cache
     rm -rf /tmp/pip-cache
@@ -252,8 +246,7 @@ ENV VELERO_NAMESPACE=velero \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONHASHSEED=random \
-    PYTHONIOENCODING=utf-8 \
-    PYTHONOPTIMIZE=2
+    PYTHONIOENCODING=utf-8
 
 # Optimized application directory structure with minimal permissions
 WORKDIR /app
@@ -261,9 +254,13 @@ RUN set -eux; \
     # Create optimized directory structure
     mkdir -p /app/logs /app/config /app/data /app/tmp; \
     \
+    # Create Streamlit config directory for user
+    mkdir -p /home/appuser/.streamlit; \
+    \
     # Set minimal required permissions
     chmod 750 /app; \
-    chmod 750 /app/logs /app/config /app/data /app/tmp
+    chmod 750 /app/logs /app/config /app/data /app/tmp; \
+    chmod 750 /home/appuser/.streamlit
 
 # Security-hardened user creation with optimal settings
 RUN set -eux; \
@@ -284,7 +281,7 @@ COPY --from=app-builder /app-optimized/src/ ./src/
 # Optimized ownership and permission setup with validation
 RUN set -eux; \
     # Set ownership
-    chown -R appuser:appuser /app /home/appuser/.local; \
+    chown -R appuser:appuser /app /home/appuser/.local /home/appuser/.streamlit; \
     \
     # Set directory permissions
     find /app -type d -exec chmod 750 {} \;; \
@@ -311,7 +308,46 @@ ENV HOME=/app \
     TMPDIR=/app/tmp \
     STREAMLIT_SERVER_ENABLE_STATIC_SERVING=false \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    STREAMLIT_GLOBAL_DEVELOPMENT_MODE=false
+    STREAMLIT_GLOBAL_DEVELOPMENT_MODE=false \
+    STREAMLIT_CONFIG_DIR=/home/appuser/.streamlit \
+    STREAMLIT_SHARING_MODE=false
+
+# Pre-flight verification with comprehensive checks (skip Streamlit for build-time)
+RUN set -eux; \
+    echo "Starting pre-flight verification..."; \
+    \
+    # Verify core dependencies can be imported
+    python -c "import kubernetes; print('✓ Kubernetes: available')"; \
+    python -c "import requests; print('✓ Requests: available')"; \
+    python -c "import yaml; print('✓ PyYAML: available')"; \
+    python -c "import dateutil; print('✓ python-dateutil: available')"; \
+    \
+    # Check if Streamlit package exists (without importing config)
+    test -d /home/appuser/.local/lib/python3.11/site-packages/streamlit && echo "✓ Streamlit package: installed"; \
+    \
+    # Verify Velero binary functionality
+    velero version --client-only; \
+    echo "✓ Velero CLI: operational"; \
+    \
+    # Verify application entry point exists and is syntactically valid
+    test -f /app/src/main.py || exit 1; \
+    python -c "import ast; ast.parse(open('/app/src/main.py').read())" || exit 1; \
+    echo "✓ Application entry point: validated"; \
+    \
+    # Generate comprehensive optimization report
+    APP_SIZE=$(du -sh /app | cut -f1); \
+    DEP_SIZE=$(du -sh /home/appuser/.local | cut -f1); \
+    TOTAL_FILES=$(find /app /home/appuser/.local -type f | wc -l); \
+    PYTHON_FILES=$(find /app/src -name "*.py" | wc -l); \
+    echo ""; \
+    echo "=== Optimization Report ==="; \
+    echo "Application size: $APP_SIZE"; \
+    echo "Dependencies size: $DEP_SIZE"; \
+    echo "Total files: $TOTAL_FILES"; \
+    echo "Python source files: $PYTHON_FILES"; \
+    echo "=========================="; \
+    echo ""; \
+    echo "✓ Pre-flight verification completed successfully"
 
 # Switch to non-root user for enhanced security
 USER appuser:appuser
