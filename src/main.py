@@ -1,5 +1,4 @@
 import streamlit as st
-import sys
 import os
 import logging
 from typing import List, Optional
@@ -7,7 +6,6 @@ from typing import List, Optional
 # Import authentication functions
 from auth import (
     check_authentication, 
-    get_current_user,
     require_groups,
     is_user_admin,
     set_dev_headers,
@@ -49,11 +47,14 @@ def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
         # Create namespace manager with optimized configuration
         ns_config = NamespaceManagerConfig(
             max_concurrent_workers=10,
-            discovery_cache_ttl=300,  # 5 minutes
-            rbac_cache_ttl=600,       # 10 minutes
+            cache_ttl=300.0,          # 5 minutes for namespace discovery
+            rbac_cache_ttl=600.0,     # 10 minutes for RBAC results
             enable_performance_tracking=True,
             enable_circuit_breaker=True,
-            enable_retry_logic=True
+            enable_retry_logic=True,
+            enable_memory_optimization=True,
+            large_cluster_threshold=500,
+            batch_size_large_clusters=50
         )
         
         return NamespaceManager(k8s_client, ns_config)
