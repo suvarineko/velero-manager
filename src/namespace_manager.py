@@ -73,7 +73,7 @@ class NamespaceManagerConfig:
     max_concurrent_workers: int = 10
     rbac_check_timeout: float = 30.0
     
-    # Admin permission definitions
+    # Admin permission definitions  
     admin_verbs: Set[str] = field(default_factory=lambda: {
         'create', 'delete', 'deletecollection', 'patch', 'update'
     })
@@ -82,8 +82,11 @@ class NamespaceManagerConfig:
         'persistentvolumeclaims', 'roles', 'rolebindings'
     })
     
-    # Minimum admin permissions required (percentage)
-    admin_threshold: float = 0.6  # 60% of admin permissions required
+    # Admin access requires ALL permissions to pass (no threshold)
+    
+    # Performance tracking configuration
+    enable_performance_tracking: bool = True
+    track_cache_hit_miss: bool = True
     
     # Filtering and sorting
     default_sort_order: SortOrder = SortOrder.NAME_ASC
@@ -125,6 +128,20 @@ class NamespaceManager:
         # Thread safety for caching operations
         self._cache_lock = threading.RLock()
         
+        # Performance tracking
+        self._performance_stats = {
+            'namespace_cache_hits': 0,
+            'namespace_cache_misses': 0,
+            'rbac_cache_hits': 0,
+            'rbac_cache_misses': 0,
+            'discovery_cache_hits': 0,
+            'discovery_cache_misses': 0,
+            'total_discovery_calls': 0,
+            'total_rbac_calls': 0,
+            'average_discovery_time': 0.0,
+            'average_rbac_time': 0.0
+        }
+        
         self.logger.info("NamespaceManager initialized with config: %s", self.config)
     
     def discover_namespaces(self, 
@@ -145,6 +162,9 @@ class NamespaceManager:
         start_time = time.time()
         self.logger.info("Starting namespace discovery - force_refresh=%s, include_rbac_check=%s", 
                         force_refresh, include_rbac_check)
+        
+        # Track discovery operation
+        discovery_start_time = time.time()
         
         # Step 1: Check cache first (unless force refresh)
         if not force_refresh and self.config.enable_cache:
@@ -183,6 +203,11 @@ class NamespaceManager:
                 self._cache_discovery_results(namespace_infos)
             
             duration = time.time() - start_time
+            discovery_duration = time.time() - discovery_start_time
+            
+            # Track performance metrics
+            self._track_operation_time('discovery', discovery_duration)
+            
             self.logger.info("Namespace discovery completed in %.2fs - found %d namespaces", 
                            duration, len(namespace_infos))
             
@@ -199,6 +224,9 @@ class NamespaceManager:
         """
         Check admin permissions for a specific namespace using SelfSubjectAccessReview.
         
+        Uses the Kubernetes SelfSubjectAccessReview API to check all configured admin
+        permissions. Returns admin access only if ALL permission checks pass.
+        
         Args:
             namespace: Namespace to check permissions for
             use_cache: Whether to use cached results
@@ -206,10 +234,81 @@ class NamespaceManager:
         Returns:
             Tuple[bool, Dict[str, bool]]: (has_admin_access, detailed_permissions)
         """
-        # Method stub - will be implemented in subsequent tasks
-        self.logger.info("check_rbac_access called for namespace=%s, use_cache=%s", 
-                        namespace, use_cache)
-        return False, {}
+        start_time = time.time()
+        self.logger.debug("Checking RBAC access for namespace '%s' (use_cache=%s)", 
+                         namespace, use_cache)
+        
+        # Step 1: Check cache first
+        if use_cache and self.config.enable_cache:
+            cached_result = self._get_cached_rbac_result(namespace)
+            if cached_result is not None:
+                has_admin, permissions = cached_result
+                self.logger.debug("RBAC cache hit for namespace '%s': admin=%s", 
+                                namespace, has_admin)
+                return has_admin, permissions
+        
+        try:
+            # Step 2: Generate all permission checks for admin access
+            permission_checks = self._generate_admin_permission_checks(namespace)
+            
+            self.logger.debug("Checking %d admin permissions for namespace '%s'", 
+                            len(permission_checks), namespace)
+            
+            # Step 3: Use k8s_client.can_i_batch() for parallel SelfSubjectAccessReview calls
+            batch_results = self.k8s_client.can_i_batch(permission_checks, use_cache=use_cache)
+            
+            # Step 4: Process results - ALL permissions must pass for admin access
+            detailed_permissions = {}
+            all_passed = True
+            
+            for verb, resource, ns in permission_checks:
+                cache_key = f"{verb}:{resource}:{ns or '*'}"
+                
+                if cache_key in batch_results:
+                    allowed, error_msg = batch_results[cache_key]
+                    permission_key = f"{verb}:{resource}"
+                    detailed_permissions[permission_key] = allowed
+                    
+                    if not allowed:
+                        all_passed = False
+                        self.logger.debug("Permission denied for %s in namespace '%s': %s", 
+                                        permission_key, namespace, error_msg or "Access denied")
+                else:
+                    # If a permission check is missing from results, consider it denied
+                    permission_key = f"{verb}:{resource}"
+                    detailed_permissions[permission_key] = False
+                    all_passed = False
+                    self.logger.warning("Missing permission result for %s in namespace '%s'", 
+                                      permission_key, namespace)
+            
+            # Step 5: Determine admin access (ALL permissions must pass)
+            has_admin_access = all_passed and len(detailed_permissions) > 0
+            
+            # Step 6: Cache the result
+            if self.config.enable_cache:
+                self._cache_rbac_result(namespace, has_admin_access, detailed_permissions)
+            
+            duration = time.time() - start_time
+            granted_count = sum(1 for allowed in detailed_permissions.values() if allowed)
+            total_count = len(detailed_permissions)
+            
+            # Track performance metrics
+            self._track_operation_time('rbac', duration)
+            
+            self.logger.info(
+                "RBAC check completed for namespace '%s' in %.2fs: admin=%s (%d/%d permissions granted)",
+                namespace, duration, has_admin_access, granted_count, total_count
+            )
+            
+            return has_admin_access, detailed_permissions
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            self.logger.error("RBAC check failed for namespace '%s' after %.2fs: %s", 
+                            namespace, duration, e)
+            
+            # Return empty permissions on error
+            return False, {}
     
     def get_cached_namespaces(self) -> Optional[List[NamespaceInfo]]:
         """
@@ -218,14 +317,19 @@ class NamespaceManager:
         Returns:
             Optional[List[NamespaceInfo]]: Cached results or None if invalid/missing
         """
-        # Method stub - will be implemented in subsequent tasks
         with self._cache_lock:
             if not self.config.enable_cache or not self._discovery_cache:
+                self._track_cache_miss('discovery')
                 return None
             
             if self._discovery_cache.is_valid():
+                self._track_cache_hit('discovery')
                 self.logger.debug("Returning cached namespace discovery results")
                 return self._discovery_cache.data
+            else:
+                self._track_cache_miss('discovery')
+                # Remove expired cache entry
+                self._discovery_cache = None
             
             return None
     
@@ -260,11 +364,74 @@ class NamespaceManager:
         Returns:
             List[NamespaceInfo]: Sorted list of namespaces
         """
-        # Method stub - will be implemented in subsequent tasks
+        if not namespaces:
+            return namespaces
+            
         order = sort_order or self.config.default_sort_order
-        self.logger.debug("sort_namespaces called with order=%s for %d namespaces", 
-                         order, len(namespaces))
-        return namespaces
+        self.logger.debug("Sorting %d namespaces with order=%s", len(namespaces), order.value)
+        
+        try:
+            if order == SortOrder.NAME_ASC:
+                # Case-insensitive ascending sort by name with None-safe handling
+                return sorted(namespaces, key=lambda ns: self._get_sort_key_name(ns.name))
+            elif order == SortOrder.NAME_DESC:
+                # Case-insensitive descending sort by name with None-safe handling
+                return sorted(namespaces, key=lambda ns: self._get_sort_key_name(ns.name), reverse=True)
+            elif order == SortOrder.CREATED_ASC:
+                # Ascending sort by creation time, None values last
+                return sorted(namespaces, key=lambda ns: self._get_sort_key_created(ns.created))
+            elif order == SortOrder.CREATED_DESC:
+                # Descending sort by creation time, None values last
+                return sorted(namespaces, key=lambda ns: self._get_sort_key_created(ns.created), reverse=True)
+            elif order == SortOrder.ADMIN_ACCESS_FIRST:
+                # Admin access first, then by name (stable secondary sort)
+                return sorted(namespaces, key=lambda ns: (not ns.has_admin_access, self._get_sort_key_name(ns.name)))
+            else:
+                self.logger.warning("Unknown sort order: %s, using default NAME_ASC", order)
+                return sorted(namespaces, key=lambda ns: self._get_sort_key_name(ns.name))
+                
+        except Exception as e:
+            self.logger.error("Error sorting namespaces: %s", e)
+            # Return original list on error
+            return namespaces
+    
+    def _get_sort_key_name(self, name: Optional[str]) -> str:
+        """
+        Get a case-insensitive, None-safe sort key for namespace names.
+        
+        Args:
+            name: Namespace name (can be None)
+            
+        Returns:
+            str: Sort key (empty string for None, lowercase for others)
+        """
+        if name is None:
+            return ""
+        return name.lower()
+    
+    def _get_sort_key_created(self, created: Optional[str]) -> tuple:
+        """
+        Get a sort key for creation timestamps with None-safe handling.
+        
+        Args:
+            created: ISO 8601 timestamp string (can be None)
+            
+        Returns:
+            tuple: (is_none, parsed_datetime) for proper sorting
+        """
+        if created is None:
+            # None values sort last (is_none=True sorts after is_none=False)
+            return (True, "")
+        
+        try:
+            # Parse ISO 8601 timestamp
+            from datetime import datetime
+            parsed_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            return (False, parsed_dt)
+        except (ValueError, AttributeError) as e:
+            self.logger.debug("Failed to parse creation timestamp '%s': %s", created, e)
+            # Invalid dates sort last but before None
+            return (True, created or "")
     
     def filter_namespaces(self, 
                          namespaces: List[NamespaceInfo],
@@ -323,37 +490,119 @@ class NamespaceManager:
         Returns:
             Dict[str, Any]: Cache statistics including hit rates and entry counts
         """
-        # Method stub - will be implemented in subsequent tasks
         with self._cache_lock:
-            return {
+            stats = {
                 'namespace_cache_entries': len(self._namespace_cache),
                 'rbac_cache_entries': len(self._rbac_cache),
                 'discovery_cache_valid': self._discovery_cache is not None and self._discovery_cache.is_valid(),
                 'cache_enabled': self.config.enable_cache
             }
+            
+            # Add performance tracking if enabled
+            if self.config.enable_performance_tracking:
+                stats.update(self._performance_stats.copy())
+                
+                # Calculate hit ratios
+                namespace_total = stats['namespace_cache_hits'] + stats['namespace_cache_misses']
+                rbac_total = stats['rbac_cache_hits'] + stats['rbac_cache_misses']
+                discovery_total = stats['discovery_cache_hits'] + stats['discovery_cache_misses']
+                
+                stats.update({
+                    'namespace_cache_hit_ratio': stats['namespace_cache_hits'] / namespace_total if namespace_total > 0 else 0.0,
+                    'rbac_cache_hit_ratio': stats['rbac_cache_hits'] / rbac_total if rbac_total > 0 else 0.0,
+                    'discovery_cache_hit_ratio': stats['discovery_cache_hits'] / discovery_total if discovery_total > 0 else 0.0,
+                    'overall_cache_hit_ratio': (stats['namespace_cache_hits'] + stats['rbac_cache_hits'] + stats['discovery_cache_hits']) / 
+                                              (namespace_total + rbac_total + discovery_total) if (namespace_total + rbac_total + discovery_total) > 0 else 0.0
+                })
+            
+            return stats
+    
+    def _track_cache_hit(self, cache_type: str) -> None:
+        """Track a cache hit for performance monitoring."""
+        if self.config.enable_performance_tracking and self.config.track_cache_hit_miss:
+            self._performance_stats[f'{cache_type}_cache_hits'] += 1
+    
+    def _track_cache_miss(self, cache_type: str) -> None:
+        """Track a cache miss for performance monitoring."""
+        if self.config.enable_performance_tracking and self.config.track_cache_hit_miss:
+            self._performance_stats[f'{cache_type}_cache_misses'] += 1
+    
+    def _track_operation_time(self, operation_type: str, elapsed_time: float) -> None:
+        """Track operation timing for performance monitoring."""
+        if self.config.enable_performance_tracking:
+            total_calls_key = f'total_{operation_type}_calls'
+            avg_time_key = f'average_{operation_type}_time'
+            
+            current_calls = self._performance_stats[total_calls_key]
+            current_avg = self._performance_stats[avg_time_key]
+            
+            # Calculate new average using incremental formula
+            new_calls = current_calls + 1
+            new_avg = (current_avg * current_calls + elapsed_time) / new_calls
+            
+            self._performance_stats[total_calls_key] = new_calls
+            self._performance_stats[avg_time_key] = new_avg
+    
+    def reset_performance_stats(self) -> None:
+        """Reset all performance tracking statistics."""
+        if self.config.enable_performance_tracking:
+            with self._cache_lock:
+                for key in self._performance_stats:
+                    if key.endswith('_time'):
+                        self._performance_stats[key] = 0.0
+                    else:
+                        self._performance_stats[key] = 0
+                self.logger.debug("Performance statistics reset")
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get a formatted performance summary.
+        
+        Returns:
+            Dict[str, Any]: Human-readable performance summary
+        """
+        if not self.config.enable_performance_tracking:
+            return {'performance_tracking': 'disabled'}
+            
+        stats = self.get_cache_statistics()
+        
+        return {
+            'cache_performance': {
+                'overall_hit_ratio': f"{stats.get('overall_cache_hit_ratio', 0.0):.2%}",
+                'namespace_hit_ratio': f"{stats.get('namespace_cache_hit_ratio', 0.0):.2%}",
+                'rbac_hit_ratio': f"{stats.get('rbac_cache_hit_ratio', 0.0):.2%}",
+                'discovery_hit_ratio': f"{stats.get('discovery_cache_hit_ratio', 0.0):.2%}"
+            },
+            'operation_performance': {
+                'total_discovery_calls': stats.get('total_discovery_calls', 0),
+                'average_discovery_time': f"{stats.get('average_discovery_time', 0.0):.3f}s",
+                'total_rbac_calls': stats.get('total_rbac_calls', 0),
+                'average_rbac_time': f"{stats.get('average_rbac_time', 0.0):.3f}s"
+            },
+            'cache_entries': {
+                'namespace_cache': stats.get('namespace_cache_entries', 0),
+                'rbac_cache': stats.get('rbac_cache_entries', 0),
+                'discovery_cache_valid': stats.get('discovery_cache_valid', False)
+            }
+        }
     
     def validate_admin_permissions(self, permissions: Dict[str, bool]) -> bool:
         """
-        Validate if permission set meets admin threshold.
+        Validate if permission set meets admin requirements.
+        
+        Admin access requires ALL permissions to pass (100% success rate).
         
         Args:
             permissions: Dictionary of permission results
             
         Returns:
-            bool: True if permissions meet admin threshold
+            bool: True if ALL permissions are granted (admin access)
         """
-        # Method stub - will be implemented in subsequent tasks
         if not permissions:
             return False
         
-        granted_count = sum(1 for granted in permissions.values() if granted)
-        total_count = len(permissions)
-        
-        if total_count == 0:
-            return False
-        
-        percentage = granted_count / total_count
-        return percentage >= self.config.admin_threshold
+        # All permissions must be granted for admin access
+        return all(granted for granted in permissions.values())
     
     def _is_system_namespace(self, namespace_name: str) -> bool:
         """
@@ -466,8 +715,8 @@ class NamespaceManager:
             
             # Perform RBAC checking if requested
             if include_rbac_check:
-                has_admin_access, admin_permissions = self._check_namespace_rbac_placeholder(
-                    namespace_name
+                has_admin_access, admin_permissions = self.check_rbac_access(
+                    namespace_name, use_cache=True
                 )
                 namespace_info.has_admin_access = has_admin_access
                 namespace_info.admin_permissions = admin_permissions
@@ -482,31 +731,6 @@ class NamespaceManager:
             self.logger.error("Error processing namespace '%s': %s", ns_name, e)
             return None
     
-    def _check_namespace_rbac_placeholder(self, namespace: str) -> Tuple[bool, Dict[str, bool]]:
-        """
-        Placeholder RBAC checking method for Task 4.2.
-        
-        This will be replaced with real SelfSubjectAccessReview logic in Task 4.3.
-        For now, returns admin access for namespaces starting with "openshift-".
-        
-        Args:
-            namespace: Namespace to check permissions for
-            
-        Returns:
-            Tuple[bool, Dict[str, bool]]: (has_admin_access, detailed_permissions)
-        """
-        # Placeholder logic: openshift- namespaces have admin access
-        has_admin = namespace.startswith('openshift-')
-        
-        # Generate placeholder permission details
-        permissions = {}
-        for verb in self.config.admin_verbs:
-            for resource in self.config.admin_resources:
-                # OpenShift namespaces get admin permissions, others don't
-                permissions[f"{verb}:{resource}"] = has_admin
-        
-        self.logger.debug("Placeholder RBAC check for '%s': admin=%s", namespace, has_admin)
-        return has_admin, permissions
     
     def _create_fallback_namespace_info(self, ns_data: Dict[str, Any]) -> Optional[NamespaceInfo]:
         """
@@ -561,6 +785,328 @@ class NamespaceManager:
                 
         except Exception as e:
             self.logger.error("Failed to cache discovery results: %s", e)
+    
+    def _get_cached_rbac_result(self, namespace: str) -> Optional[Tuple[bool, Dict[str, bool]]]:
+        """
+        Get cached RBAC result for a namespace if valid.
+        
+        Args:
+            namespace: Namespace to get cached RBAC result for
+            
+        Returns:
+            Optional[Tuple[bool, Dict[str, bool]]]: (has_admin_access, detailed_permissions) or None if not cached/invalid
+        """
+        if not self.config.enable_cache:
+            return None
+            
+        try:
+            with self._cache_lock:
+                cache_key = f"rbac:{namespace}"
+                
+                if cache_key not in self._rbac_cache:
+                    self._track_cache_miss('rbac')
+                    return None
+                
+                cache_entry = self._rbac_cache[cache_key]
+                
+                if not cache_entry.is_valid():
+                    # Remove expired entry
+                    del self._rbac_cache[cache_key]
+                    self._track_cache_miss('rbac')
+                    self.logger.debug("Removed expired RBAC cache entry for namespace '%s'", namespace)
+                    return None
+                
+                # Return cached result
+                self._track_cache_hit('rbac')
+                has_admin_access, detailed_permissions = cache_entry.data
+                self.logger.debug("RBAC cache hit for namespace '%s': admin=%s", namespace, has_admin_access)
+                return has_admin_access, detailed_permissions
+                
+        except Exception as e:
+            self.logger.error("Error accessing RBAC cache for namespace '%s': %s", namespace, e)
+            return None
+    
+    def _cache_rbac_result(self, namespace: str, has_admin_access: bool, detailed_permissions: Dict[str, bool]) -> None:
+        """
+        Cache RBAC result for a namespace with configured TTL.
+        
+        Args:
+            namespace: Namespace to cache RBAC result for
+            has_admin_access: Whether user has admin access to the namespace
+            detailed_permissions: Dictionary of detailed permission results
+        """
+        if not self.config.enable_cache:
+            return
+            
+        try:
+            with self._cache_lock:
+                cache_key = f"rbac:{namespace}"
+                
+                self._rbac_cache[cache_key] = CacheEntry(
+                    data=(has_admin_access, detailed_permissions.copy()),
+                    timestamp=time.time(),
+                    ttl=self.config.rbac_cache_ttl
+                )
+                
+                self.logger.debug("Cached RBAC result for namespace '%s': admin=%s (%d permissions)", 
+                                namespace, has_admin_access, len(detailed_permissions))
+                
+        except Exception as e:
+            self.logger.error("Failed to cache RBAC result for namespace '%s': %s", namespace, e)
+    
+    def warm_namespace_cache(self, include_rbac_check: bool = True) -> bool:
+        """
+        Proactively warm the namespace cache by performing discovery.
+        
+        Args:
+            include_rbac_check: Whether to include RBAC checking in cache warming
+            
+        Returns:
+            bool: True if cache warming was successful
+        """
+        try:
+            self.logger.info("Starting namespace cache warming (include_rbac=%s)", include_rbac_check)
+            start_time = time.time()
+            
+            # Perform namespace discovery which will populate caches
+            namespaces = self.discover_namespaces(
+                include_rbac_check=include_rbac_check, 
+                force_refresh=True  # Force fresh discovery for warming
+            )
+            
+            elapsed_time = time.time() - start_time
+            self.logger.info("Namespace cache warming completed: %d namespaces in %.2fs", 
+                           len(namespaces), elapsed_time)
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error("Error during namespace cache warming: %s", e)
+            return False
+    
+    def warm_rbac_cache(self, namespaces: List[str] = None) -> Dict[str, bool]:
+        """
+        Proactively warm the RBAC cache for specified namespaces.
+        
+        Args:
+            namespaces: List of namespace names to warm RBAC cache for, or None to discover and warm all
+            
+        Returns:
+            Dict[str, bool]: Mapping of namespace name to cache warming success
+        """
+        try:
+            if namespaces is None:
+                # Get current namespaces from cache or discover them
+                try:
+                    cached_namespaces = self.get_cached_namespaces()
+                    if cached_namespaces:
+                        namespaces = [ns.name for ns in cached_namespaces]
+                    else:
+                        # Discover namespaces without RBAC to get the list
+                        discovered = self.discover_namespaces(include_rbac_check=False, force_refresh=True)
+                        namespaces = [ns.name for ns in discovered]
+                except Exception as e:
+                    self.logger.warning("Could not get namespace list for RBAC warming: %s", e)
+                    return {}
+            
+            self.logger.info("Starting RBAC cache warming for %d namespaces", len(namespaces))
+            start_time = time.time()
+            results = {}
+            
+            # Use ThreadPoolExecutor for parallel RBAC warming
+            with ThreadPoolExecutor(max_workers=self.config.max_concurrent_workers) as executor:
+                
+                def warm_single_rbac(namespace: str) -> Tuple[str, bool]:
+                    try:
+                        # Force fresh RBAC check to populate cache
+                        has_admin, _ = self.check_rbac_access(namespace, use_cache=False)
+                        self.logger.debug("Warmed RBAC cache for namespace '%s': admin=%s", 
+                                        namespace, has_admin)
+                        return namespace, True
+                    except Exception as e:
+                        self.logger.warning("Failed to warm RBAC cache for namespace '%s': %s", 
+                                          namespace, e)
+                        return namespace, False
+                
+                # Submit all warming tasks
+                future_to_namespace = {
+                    executor.submit(warm_single_rbac, ns): ns for ns in namespaces
+                }
+                
+                # Collect results
+                for future in as_completed(future_to_namespace):
+                    namespace, success = future.result()
+                    results[namespace] = success
+            
+            elapsed_time = time.time() - start_time
+            successful_count = sum(1 for success in results.values() if success)
+            self.logger.info("RBAC cache warming completed: %d/%d successful in %.2fs", 
+                           successful_count, len(namespaces), elapsed_time)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error("Error during RBAC cache warming: %s", e)
+            return {}
+    
+    def warm_all_caches(self, force_fresh: bool = False) -> Dict[str, Any]:
+        """
+        Warm all caches (namespace discovery and RBAC).
+        
+        Args:
+            force_fresh: If True, invalidate existing caches before warming
+            
+        Returns:
+            Dict[str, Any]: Warming results with statistics
+        """
+        try:
+            start_time = time.time()
+            self.logger.info("Starting comprehensive cache warming (force_fresh=%s)", force_fresh)
+            
+            if force_fresh:
+                self.invalidate_all_caches()
+            
+            # Warm namespace cache first (includes discovery)
+            namespace_success = self.warm_namespace_cache(include_rbac_check=False)
+            
+            # Then warm RBAC cache for all discovered namespaces
+            rbac_results = self.warm_rbac_cache()
+            
+            elapsed_time = time.time() - start_time
+            
+            # Compile results
+            results = {
+                'namespace_warming_success': namespace_success,
+                'rbac_warming_results': rbac_results,
+                'total_namespaces': len(rbac_results),
+                'successful_rbac_warming': sum(1 for success in rbac_results.values() if success),
+                'elapsed_time': elapsed_time,
+                'cache_statistics': self.get_cache_statistics()
+            }
+            
+            self.logger.info("Comprehensive cache warming completed in %.2fs: %d/%d namespaces", 
+                           elapsed_time, results['successful_rbac_warming'], results['total_namespaces'])
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error("Error during comprehensive cache warming: %s", e)
+            return {
+                'namespace_warming_success': False,
+                'rbac_warming_results': {},
+                'error': str(e)
+            }
+    
+    def invalidate_namespace_cache(self, namespace: str = None) -> bool:
+        """
+        Invalidate namespace cache entries.
+        
+        Args:
+            namespace: Specific namespace to invalidate, or None to invalidate all namespace caches
+            
+        Returns:
+            bool: True if any cache entries were invalidated
+        """
+        if not self.config.enable_cache:
+            return False
+            
+        try:
+            with self._cache_lock:
+                invalidated = False
+                
+                if namespace is None:
+                    # Clear all namespace-related caches
+                    if self._discovery_cache is not None:
+                        self._discovery_cache = None
+                        invalidated = True
+                        self.logger.debug("Invalidated discovery cache")
+                    
+                    if self._namespace_cache:
+                        cleared_count = len(self._namespace_cache)
+                        self._namespace_cache.clear()
+                        invalidated = True
+                        self.logger.debug("Invalidated %d namespace cache entries", cleared_count)
+                        
+                else:
+                    # Clear specific namespace cache
+                    cache_key = f"namespace:{namespace}"
+                    if cache_key in self._namespace_cache:
+                        del self._namespace_cache[cache_key]
+                        invalidated = True
+                        self.logger.debug("Invalidated cache for namespace '%s'", namespace)
+                    
+                    # If this was the only namespace, also clear discovery cache
+                    if self._discovery_cache is not None:
+                        self._discovery_cache = None
+                        invalidated = True
+                        self.logger.debug("Invalidated discovery cache due to namespace change")
+                        
+                return invalidated
+                
+        except Exception as e:
+            self.logger.error("Error invalidating namespace cache: %s", e)
+            return False
+    
+    def invalidate_rbac_cache(self, namespace: str = None) -> bool:
+        """
+        Invalidate RBAC cache entries.
+        
+        Args:
+            namespace: Specific namespace to invalidate RBAC cache for, or None to invalidate all RBAC caches
+            
+        Returns:
+            bool: True if any cache entries were invalidated
+        """
+        if not self.config.enable_cache:
+            return False
+            
+        try:
+            with self._cache_lock:
+                invalidated = False
+                
+                if namespace is None:
+                    # Clear all RBAC caches
+                    if self._rbac_cache:
+                        cleared_count = len(self._rbac_cache)
+                        self._rbac_cache.clear()
+                        invalidated = True
+                        self.logger.debug("Invalidated %d RBAC cache entries", cleared_count)
+                        
+                else:
+                    # Clear specific namespace RBAC cache
+                    cache_key = f"rbac:{namespace}"
+                    if cache_key in self._rbac_cache:
+                        del self._rbac_cache[cache_key]
+                        invalidated = True
+                        self.logger.debug("Invalidated RBAC cache for namespace '%s'", namespace)
+                        
+                return invalidated
+                
+        except Exception as e:
+            self.logger.error("Error invalidating RBAC cache: %s", e)
+            return False
+    
+    def invalidate_all_caches(self) -> bool:
+        """
+        Invalidate all cache entries.
+        
+        Returns:
+            bool: True if any cache entries were invalidated
+        """
+        try:
+            namespace_invalidated = self.invalidate_namespace_cache()
+            rbac_invalidated = self.invalidate_rbac_cache()
+            
+            if namespace_invalidated or rbac_invalidated:
+                self.logger.info("Invalidated all caches")
+                return True
+            else:
+                self.logger.debug("No cache entries to invalidate")
+                return False
+                
+        except Exception as e:
+            self.logger.error("Error invalidating all caches: %s", e)
+            return False
     
     def __enter__(self):
         """Context manager entry"""
