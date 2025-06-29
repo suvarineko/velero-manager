@@ -23,6 +23,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 
 @st.cache_resource
 def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
@@ -40,9 +46,24 @@ def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
         k8s_client = KubernetesClient(k8s_config)
         
         # Authenticate with bearer token
-        if not k8s_client.authenticate_with_token(bearer_token):
+        logging.info(f"Attempting authentication with token length: {len(bearer_token) if bearer_token else 0}")
+        auth_result = k8s_client.authenticate_with_token(bearer_token)
+        logging.info(f"Authentication result: {auth_result}")
+        
+        if not auth_result:
             logging.error("Failed to authenticate with Kubernetes API")
+            # Log authentication state for debugging
+            logging.error(f"Client authenticated state: {k8s_client.is_authenticated()}")
+            logging.error(f"Current user: {k8s_client._current_user is not None if hasattr(k8s_client, '_current_user') else 'No _current_user attr'}")
+            logging.error(f"API client: {k8s_client.api_client is not None if hasattr(k8s_client, 'api_client') else 'No api_client attr'}")
             return None
+        
+        # Verify authentication worked
+        if not k8s_client.is_authenticated():
+            logging.error("Authentication returned True but client is not authenticated")
+            return None
+        
+        logging.info("Kubernetes client successfully authenticated")
         
         # Create namespace manager with optimized configuration
         ns_config = NamespaceManagerConfig(
@@ -172,7 +193,18 @@ def show_main_interface(user):
         if not hasattr(user, 'bearer_token') or not user.bearer_token:
             st.error("❌ Missing authentication token")
             st.caption("Bearer token is required for Kubernetes API access. Please re-authenticate.")
+            # Debug info in development mode
+            if os.getenv('DEV_MODE', '').lower() == 'true':
+                st.code(f"User object: {type(user)}")
+                st.code(f"User attributes: {dir(user)}")
+                if hasattr(user, 'raw_headers'):
+                    st.code(f"Raw headers keys: {list(user.raw_headers.keys()) if user.raw_headers else 'None'}")
             return
+        
+        # Debug token info in development mode
+        if os.getenv('DEV_MODE', '').lower() == 'true':
+            logging.info(f"User bearer token available: {bool(user.bearer_token)}")
+            logging.info(f"Token starts with: {user.bearer_token[:20] if user.bearer_token else 'None'}...")
         
         # Initialize namespace manager
         namespace_manager = get_namespace_manager(user.bearer_token)
