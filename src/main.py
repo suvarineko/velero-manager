@@ -31,7 +31,7 @@ logging.basicConfig(
 
 
 @st.cache_resource
-def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
+def get_namespace_manager(user_info) -> Optional[NamespaceManager]:
     """Initialize and cache the namespace manager with Kubernetes client."""
     try:
         # Configure Kubernetes client
@@ -45,25 +45,25 @@ def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
         )
         k8s_client = KubernetesClient(k8s_config)
         
-        # Authenticate with bearer token
-        logging.info(f"Attempting authentication with token length: {len(bearer_token) if bearer_token else 0}")
-        auth_result = k8s_client.authenticate_with_token(bearer_token)
+        # Authenticate with user info (proper method that sets up session)
+        logging.info(f"Attempting authentication with token length: {len(user_info.bearer_token) if user_info.bearer_token else 0}")
+        
+        auth_result = k8s_client.authenticate_with_user_info(user_info)
         logging.info(f"Authentication result: {auth_result}")
         
         if not auth_result:
             logging.error("Failed to authenticate with Kubernetes API")
-            # Log authentication state for debugging
-            logging.error(f"Client authenticated state: {k8s_client.is_authenticated()}")
-            logging.error(f"Current user: {k8s_client._current_user is not None if hasattr(k8s_client, '_current_user') else 'No _current_user attr'}")
-            logging.error(f"API client: {k8s_client.api_client is not None if hasattr(k8s_client, 'api_client') else 'No api_client attr'}")
             return None
         
         # Verify authentication worked
         if not k8s_client.is_authenticated():
-            logging.error("Authentication returned True but client is not authenticated")
+            logging.error("Authentication completed but client is not authenticated")
+            logging.error(f"Current user set: {k8s_client._current_user is not None}")
+            logging.error(f"API client set: {k8s_client.api_client is not None}")
+            logging.error(f"Session valid: {k8s_client._is_session_valid()}")
             return None
         
-        logging.info("Kubernetes client successfully authenticated")
+        logging.info("Kubernetes client successfully authenticated and session established")
         
         # Create namespace manager with optimized configuration
         ns_config = NamespaceManagerConfig(
@@ -207,7 +207,7 @@ def show_main_interface(user):
             logging.info(f"Token starts with: {user.bearer_token[:20] if user.bearer_token else 'None'}...")
         
         # Initialize namespace manager
-        namespace_manager = get_namespace_manager(user.bearer_token)
+        namespace_manager = get_namespace_manager(user)
         
         if not namespace_manager:
             st.error("❌ Failed to initialize Kubernetes connection")
