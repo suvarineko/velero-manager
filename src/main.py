@@ -1,6 +1,8 @@
 import streamlit as st
 import sys
 import os
+import logging
+from typing import List, Optional
 
 # Import authentication functions
 from auth import (
@@ -12,12 +14,56 @@ from auth import (
     clear_dev_headers
 )
 
+# Import Kubernetes and namespace management
+from k8s_client import KubernetesClient, K8sClientConfig
+from namespace_manager import NamespaceManager, NamespaceManagerConfig, NamespaceInfo, SortOrder
+
 st.set_page_config(
     page_title="Velero Manager",
     page_icon="🔄",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+
+@st.cache_resource
+def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
+    """Initialize and cache the namespace manager with Kubernetes client."""
+    try:
+        # Configure Kubernetes client with bearer token from authentication
+        k8s_config = K8sClientConfig(bearer_token=bearer_token)
+        k8s_client = KubernetesClient(k8s_config)
+        
+        # Create namespace manager with optimized configuration
+        ns_config = NamespaceManagerConfig(
+            max_concurrent_workers=10,
+            discovery_cache_ttl=300,  # 5 minutes
+            rbac_cache_ttl=600,       # 10 minutes
+            enable_performance_tracking=True,
+            enable_circuit_breaker=True,
+            enable_retry_logic=True
+        )
+        
+        return NamespaceManager(k8s_client, ns_config)
+    except Exception as e:
+        logging.error(f"Failed to initialize namespace manager: {e}")
+        return None
+
+
+def load_namespaces(namespace_manager: NamespaceManager) -> tuple[List[NamespaceInfo], Optional[str]]:
+    """Load namespaces with error handling and return (namespaces, error_message)."""
+    try:
+        # Discover namespaces with RBAC filtering
+        namespaces = namespace_manager.discover_namespaces(include_rbac_check=True)
+        
+        # Sort namespaces by name (ascending, case-insensitive)
+        sorted_namespaces = namespace_manager.sort_namespaces(namespaces, SortOrder.NAME_ASC)
+        
+        return sorted_namespaces, None
+    except Exception as e:
+        error_msg = f"Failed to load namespaces: {str(e)}"
+        logging.error(error_msg)
+        return [], error_msg
 
 def main():
     try:
@@ -108,9 +154,92 @@ def show_main_interface(user):
     
     with col1:
         st.subheader("📁 Namespace Selection")
-        # For now, show placeholder - will be replaced with actual namespace discovery
-        st.selectbox("Select Namespace", ["Loading..."], disabled=True, 
-                    help="Namespace selection will be available once Kubernetes API integration is complete")
+        
+        # Check for bearer token
+        if not hasattr(user, 'bearer_token') or not user.bearer_token:
+            st.error("❌ Missing authentication token")
+            st.caption("Bearer token is required for Kubernetes API access. Please re-authenticate.")
+            return
+        
+        # Initialize namespace manager
+        namespace_manager = get_namespace_manager(user.bearer_token)
+        
+        if not namespace_manager:
+            st.error("❌ Failed to initialize Kubernetes connection")
+            st.caption("Please check your authentication and cluster connectivity")
+        else:
+            # Initialize session state for selected namespace
+            if 'selected_namespace' not in st.session_state:
+                st.session_state.selected_namespace = None
+            
+            # Create refresh button
+            col_ns1, col_ns2 = st.columns([3, 1])
+            
+            with col_ns1:
+                st.write("")  # Empty space for alignment
+            
+            with col_ns2:
+                refresh_clicked = st.button("🔄", help="Refresh namespace list", key="refresh_ns")
+            
+            # Load namespaces with caching and error handling
+            if refresh_clicked or 'namespaces_data' not in st.session_state:
+                with st.spinner("Loading namespaces..."):
+                    namespaces, error_msg = load_namespaces(namespace_manager)
+                    st.session_state.namespaces_data = namespaces
+                    st.session_state.namespaces_error = error_msg
+            
+            # Display namespace selection
+            if st.session_state.get('namespaces_error'):
+                st.error(f"❌ {st.session_state.namespaces_error}")
+                st.caption("Unable to load namespaces. Please check your permissions and cluster connectivity.")
+            elif not st.session_state.get('namespaces_data'):
+                st.info("🔍 No namespaces available or none found with current permissions")
+            else:
+                namespaces = st.session_state.namespaces_data
+                
+                # Create namespace options with admin access indicators
+                namespace_options = []
+                namespace_labels = []
+                
+                for ns in namespaces:
+                    namespace_options.append(ns.name)
+                    admin_indicator = " 🔑" if ns.has_admin_access else ""
+                    namespace_labels.append(f"{ns.name}{admin_indicator}")
+                
+                # Find current selection index
+                current_index = 0
+                if st.session_state.selected_namespace and st.session_state.selected_namespace in namespace_options:
+                    current_index = namespace_options.index(st.session_state.selected_namespace)
+                
+                # Namespace selection dropdown
+                selected_ns = st.selectbox(
+                    "Select Namespace",
+                    options=namespace_options,
+                    format_func=lambda x: next((label for ns, label in zip(namespace_options, namespace_labels) if ns == x), x),
+                    index=current_index,
+                    help="🔑 indicates admin access to the namespace",
+                    key="namespace_selector"
+                )
+                
+                # Update session state
+                if selected_ns != st.session_state.selected_namespace:
+                    st.session_state.selected_namespace = selected_ns
+                
+                # Show namespace info
+                if selected_ns:
+                    selected_ns_info = next((ns for ns in namespaces if ns.name == selected_ns), None)
+                    if selected_ns_info:
+                        col_info1, col_info2 = st.columns(2)
+                        with col_info1:
+                            st.caption(f"Status: {selected_ns_info.status}")
+                        with col_info2:
+                            access_level = "Admin" if selected_ns_info.has_admin_access else "Read-only"
+                            st.caption(f"Access: {access_level}")
+                
+                # Show statistics
+                total_ns = len(namespaces)
+                admin_ns = sum(1 for ns in namespaces if ns.has_admin_access)
+                st.caption(f"Total: {total_ns} namespaces ({admin_ns} with admin access)")
     
     with col2:
         st.subheader("👤 User Details")

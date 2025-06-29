@@ -8,6 +8,8 @@ It includes admin permission checking, caching, and sorting functionality.
 
 import logging
 import time
+import random
+import math
 from typing import Dict, List, Optional, Set, Tuple, Any, Union
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +34,107 @@ class SortOrder(Enum):
     CREATED_ASC = "created_asc"
     CREATED_DESC = "created_desc"
     ADMIN_ACCESS_FIRST = "admin_access_first"
+
+
+class CircuitBreakerState(Enum):
+    """Circuit breaker states"""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Failing, calls blocked
+    HALF_OPEN = "half_open"  # Testing recovery
+
+
+@dataclass
+class CircuitBreaker:
+    """Simple circuit breaker for API operations"""
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0
+    
+    def __post_init__(self):
+        self.failure_count: int = 0
+        self.last_failure_time: float = 0.0
+        self.state: CircuitBreakerState = CircuitBreakerState.CLOSED
+        self._lock = threading.Lock()
+    
+    def call(self, func, *args, **kwargs):
+        """Execute function with circuit breaker protection"""
+        if not self._can_execute():
+            raise Exception("Circuit breaker is OPEN - operation blocked")
+        
+        try:
+            result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except Exception as e:
+            self._on_failure()
+            raise
+    
+    def _can_execute(self) -> bool:
+        """Check if operation can be executed"""
+        with self._lock:
+            if self.state == CircuitBreakerState.CLOSED:
+                return True
+            elif self.state == CircuitBreakerState.OPEN:
+                if time.time() - self.last_failure_time >= self.recovery_timeout:
+                    self.state = CircuitBreakerState.HALF_OPEN
+                    return True
+                return False
+            else:  # HALF_OPEN
+                return True
+    
+    def _on_success(self):
+        """Handle successful operation"""
+        with self._lock:
+            self.failure_count = 0
+            if self.state == CircuitBreakerState.HALF_OPEN:
+                self.state = CircuitBreakerState.CLOSED
+    
+    def _on_failure(self):
+        """Handle failed operation"""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitBreakerState.OPEN
+
+
+class RetryManager:
+    """Exponential backoff retry manager"""
+    
+    def __init__(self, max_retries: int = 3, initial_delay: float = 1.0, 
+                 max_delay: float = 30.0, backoff_multiplier: float = 2.0):
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.backoff_multiplier = backoff_multiplier
+    
+    def execute_with_retry(self, func, *args, **kwargs):
+        """Execute function with exponential backoff retry"""
+        last_exception = None
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                
+                if attempt == self.max_retries:
+                    # Final attempt failed
+                    break
+                
+                # Calculate delay with jitter
+                delay = min(
+                    self.initial_delay * (self.backoff_multiplier ** attempt),
+                    self.max_delay
+                )
+                # Add jitter (±20%)
+                jitter = delay * 0.2 * (random.random() * 2 - 1)
+                delay_with_jitter = max(0.1, delay + jitter)
+                
+                time.sleep(delay_with_jitter)
+        
+        # All retries failed
+        raise last_exception
 
 
 @dataclass
@@ -88,6 +191,25 @@ class NamespaceManagerConfig:
     enable_performance_tracking: bool = True
     track_cache_hit_miss: bool = True
     
+    # Error handling and resilience configuration
+    enable_circuit_breaker: bool = True
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_timeout: float = 60.0
+    enable_retry_logic: bool = True
+    max_retries: int = 3
+    initial_retry_delay: float = 1.0
+    max_retry_delay: float = 30.0
+    retry_backoff_multiplier: float = 2.0
+    
+    # Memory optimization configuration
+    large_cluster_threshold: int = 500  # Consider cluster "large" if > 500 namespaces
+    batch_size_large_clusters: int = 50  # Process in batches for large clusters
+    enable_memory_optimization: bool = True
+    
+    # Graceful degradation configuration
+    allow_partial_rbac_failures: bool = True
+    fallback_to_cached_data: bool = True
+    
     # Filtering and sorting
     default_sort_order: SortOrder = SortOrder.NAME_ASC
     include_system_namespaces: bool = False
@@ -139,8 +261,35 @@ class NamespaceManager:
             'total_discovery_calls': 0,
             'total_rbac_calls': 0,
             'average_discovery_time': 0.0,
-            'average_rbac_time': 0.0
+            'average_rbac_time': 0.0,
+            'circuit_breaker_trips': 0,
+            'retry_attempts': 0,
+            'graceful_degradations': 0
         }
+        
+        # Error handling and resilience components
+        if self.config.enable_circuit_breaker:
+            self._discovery_circuit_breaker = CircuitBreaker(
+                failure_threshold=self.config.circuit_breaker_failure_threshold,
+                recovery_timeout=self.config.circuit_breaker_recovery_timeout
+            )
+            self._rbac_circuit_breaker = CircuitBreaker(
+                failure_threshold=self.config.circuit_breaker_failure_threshold,
+                recovery_timeout=self.config.circuit_breaker_recovery_timeout
+            )
+        else:
+            self._discovery_circuit_breaker = None
+            self._rbac_circuit_breaker = None
+        
+        if self.config.enable_retry_logic:
+            self._retry_manager = RetryManager(
+                max_retries=self.config.max_retries,
+                initial_delay=self.config.initial_retry_delay,
+                max_delay=self.config.max_retry_delay,
+                backoff_multiplier=self.config.retry_backoff_multiplier
+            )
+        else:
+            self._retry_manager = None
         
         self.logger.info("NamespaceManager initialized with config: %s", self.config)
     
@@ -178,9 +327,15 @@ class NamespaceManager:
                 return cached_result
         
         try:
-            # Step 2: Fetch raw namespace data from Kubernetes API
-            self.logger.debug("Fetching namespaces from Kubernetes API")
-            raw_namespaces = self.k8s_client.list_namespaces(use_cache=not force_refresh)
+            # Step 2: Fetch raw namespace data from Kubernetes API with resilience
+            def fetch_namespaces():
+                return self.k8s_client.list_namespaces(use_cache=not force_refresh)
+            
+            raw_namespaces = self._execute_with_resilience(
+                "discovery", 
+                fetch_namespaces,
+                self._discovery_circuit_breaker
+            )
             
             if not raw_namespaces:
                 self.logger.warning("No namespaces found from Kubernetes API")
@@ -188,8 +343,8 @@ class NamespaceManager:
             
             self.logger.info("Fetched %d raw namespaces from API", len(raw_namespaces))
             
-            # Step 3: Process namespaces in parallel using ThreadPoolExecutor
-            namespace_infos = self._process_namespaces_parallel(
+            # Step 3: Process namespaces with memory-conscious batching
+            namespace_infos = self._process_namespaces_in_batches(
                 raw_namespaces, 
                 include_rbac_check
             )
@@ -254,8 +409,15 @@ class NamespaceManager:
             self.logger.debug("Checking %d admin permissions for namespace '%s'", 
                             len(permission_checks), namespace)
             
-            # Step 3: Use k8s_client.can_i_batch() for parallel SelfSubjectAccessReview calls
-            batch_results = self.k8s_client.can_i_batch(permission_checks, use_cache=use_cache)
+            # Step 3: Use k8s_client.can_i_batch() for parallel SelfSubjectAccessReview calls with resilience
+            def check_permissions():
+                return self.k8s_client.can_i_batch(permission_checks, use_cache=use_cache)
+            
+            batch_results = self._execute_with_resilience(
+                "rbac",
+                check_permissions,
+                self._rbac_circuit_breaker
+            )
             
             # Step 4: Process results - ALL permissions must pass for admin access
             detailed_permissions = {}
@@ -307,7 +469,17 @@ class NamespaceManager:
             self.logger.error("RBAC check failed for namespace '%s' after %.2fs: %s", 
                             namespace, duration, e)
             
-            # Return empty permissions on error
+            # Try graceful degradation with cached data
+            if self.config.allow_partial_rbac_failures and use_cache:
+                cached_result = self._get_cached_rbac_result(namespace)
+                if cached_result is not None:
+                    has_admin, permissions = cached_result
+                    self.logger.info("Using cached RBAC data for namespace '%s' due to API failure", namespace)
+                    if self.config.enable_performance_tracking:
+                        self._performance_stats['graceful_degradations'] += 1
+                    return has_admin, permissions
+            
+            # Return safe defaults on error
             return False, {}
     
     def get_cached_namespaces(self) -> Optional[List[NamespaceInfo]]:
@@ -566,7 +738,7 @@ class NamespaceManager:
             
         stats = self.get_cache_statistics()
         
-        return {
+        summary = {
             'cache_performance': {
                 'overall_hit_ratio': f"{stats.get('overall_cache_hit_ratio', 0.0):.2%}",
                 'namespace_hit_ratio': f"{stats.get('namespace_cache_hit_ratio', 0.0):.2%}",
@@ -585,6 +757,25 @@ class NamespaceManager:
                 'discovery_cache_valid': stats.get('discovery_cache_valid', False)
             }
         }
+        
+        # Add resilience metrics if available
+        if self.config.enable_performance_tracking:
+            summary['resilience_metrics'] = {
+                'circuit_breaker_trips': stats.get('circuit_breaker_trips', 0),
+                'retry_attempts': stats.get('retry_attempts', 0),
+                'graceful_degradations': stats.get('graceful_degradations', 0),
+                'circuit_breaker_enabled': self.config.enable_circuit_breaker,
+                'retry_logic_enabled': self.config.enable_retry_logic,
+                'memory_optimization_enabled': self.config.enable_memory_optimization
+            }
+            
+            # Add circuit breaker states if available
+            if self._discovery_circuit_breaker:
+                summary['resilience_metrics']['discovery_circuit_state'] = self._discovery_circuit_breaker.state.value
+            if self._rbac_circuit_breaker:
+                summary['resilience_metrics']['rbac_circuit_state'] = self._rbac_circuit_breaker.state.value
+        
+        return summary
     
     def validate_admin_permissions(self, permissions: Dict[str, bool]) -> bool:
         """
@@ -853,6 +1044,139 @@ class NamespaceManager:
                 
         except Exception as e:
             self.logger.error("Failed to cache RBAC result for namespace '%s': %s", namespace, e)
+    
+    def _execute_with_resilience(self, operation_name: str, func, circuit_breaker=None, *args, **kwargs):
+        """
+        Execute operation with circuit breaker and retry logic.
+        
+        Args:
+            operation_name: Name of operation for logging/metrics
+            func: Function to execute
+            circuit_breaker: Circuit breaker to use (optional)
+            *args, **kwargs: Arguments for the function
+            
+        Returns:
+            Result of function execution or None on total failure
+        """
+        try:
+            # Track performance metrics
+            if self.config.enable_performance_tracking:
+                self._performance_stats[f'total_{operation_name}_calls'] += 1
+            
+            # Choose execution strategy based on configuration
+            if circuit_breaker and self.config.enable_circuit_breaker:
+                if self._retry_manager and self.config.enable_retry_logic:
+                    # Circuit breaker + retry
+                    def resilient_func():
+                        return circuit_breaker.call(func, *args, **kwargs)
+                    return self._retry_manager.execute_with_retry(resilient_func)
+                else:
+                    # Circuit breaker only
+                    return circuit_breaker.call(func, *args, **kwargs)
+            elif self._retry_manager and self.config.enable_retry_logic:
+                # Retry only
+                return self._retry_manager.execute_with_retry(func, *args, **kwargs)
+            else:
+                # Direct execution
+                return func(*args, **kwargs)
+                
+        except Exception as e:
+            self.logger.error("Operation '%s' failed after all resilience attempts: %s", operation_name, e)
+            
+            # Track performance metrics
+            if self.config.enable_performance_tracking:
+                if "circuit breaker" in str(e).lower():
+                    self._performance_stats['circuit_breaker_trips'] += 1
+                if hasattr(self, '_retry_manager') and self._retry_manager:
+                    self._performance_stats['retry_attempts'] += getattr(self._retry_manager, 'last_attempt_count', 0)
+            
+            raise
+    
+    def _process_namespaces_in_batches(self, raw_namespaces: List[Dict[str, Any]], 
+                                     include_rbac_check: bool) -> List[NamespaceInfo]:
+        """
+        Memory-conscious processing for large clusters using batching.
+        
+        Args:
+            raw_namespaces: Raw namespace data from Kubernetes API
+            include_rbac_check: Whether to include RBAC checking
+            
+        Returns:
+            List[NamespaceInfo]: Processed namespace information
+        """
+        total_namespaces = len(raw_namespaces)
+        
+        # Determine if we should use batching
+        if (not self.config.enable_memory_optimization or 
+            total_namespaces <= self.config.large_cluster_threshold):
+            return self._process_namespaces_parallel(raw_namespaces, include_rbac_check)
+        
+        self.logger.info("Large cluster detected (%d namespaces), using batch processing with batch size %d", 
+                        total_namespaces, self.config.batch_size_large_clusters)
+        
+        all_namespace_infos = []
+        batch_size = self.config.batch_size_large_clusters
+        
+        for i in range(0, total_namespaces, batch_size):
+            batch = raw_namespaces[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = math.ceil(total_namespaces / batch_size)
+            
+            self.logger.debug("Processing batch %d/%d (%d namespaces)", 
+                            batch_num, total_batches, len(batch))
+            
+            try:
+                batch_results = self._process_namespaces_parallel(batch, include_rbac_check)
+                all_namespace_infos.extend(batch_results)
+                
+                # Optional: Small delay between batches to reduce API pressure
+                if i + batch_size < total_namespaces:
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                self.logger.error("Error processing batch %d/%d: %s", batch_num, total_batches, e)
+                
+                # Graceful degradation: continue with other batches
+                if self.config.allow_partial_rbac_failures:
+                    self.logger.warning("Continuing with other batches due to graceful degradation settings")
+                    if self.config.enable_performance_tracking:
+                        self._performance_stats['graceful_degradations'] += 1
+                    continue
+                else:
+                    raise
+        
+        self.logger.info("Batch processing completed: %d namespaces processed", len(all_namespace_infos))
+        return all_namespace_infos
+    
+    def _get_fallback_namespace_info(self, namespace_name: str, use_cache: bool = True) -> Optional[NamespaceInfo]:
+        """
+        Get fallback namespace information when primary discovery fails.
+        
+        Args:
+            namespace_name: Name of the namespace
+            use_cache: Whether to check cache for fallback data
+            
+        Returns:
+            Optional[NamespaceInfo]: Fallback namespace info or None
+        """
+        if not self.config.fallback_to_cached_data or not use_cache:
+            return None
+            
+        try:
+            # Try to get from individual namespace cache
+            with self._cache_lock:
+                cache_key = f"namespace:{namespace_name}"
+                if cache_key in self._namespace_cache:
+                    cache_entry = self._namespace_cache[cache_key]
+                    if cache_entry.is_valid():
+                        self.logger.debug("Using cached fallback data for namespace '%s'", namespace_name)
+                        if self.config.enable_performance_tracking:
+                            self._performance_stats['graceful_degradations'] += 1
+                        return cache_entry.data
+        except Exception as e:
+            self.logger.debug("Failed to get fallback data for namespace '%s': %s", namespace_name, e)
+            
+        return None
     
     def warm_namespace_cache(self, include_rbac_check: bool = True) -> bool:
         """

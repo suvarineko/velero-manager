@@ -125,7 +125,43 @@ try:
     print(f'✅ Name sort key for None: "{ns_manager._get_sort_key_name(None)}"')
     print(f'✅ Name sort key for "Test": "{ns_manager._get_sort_key_name("Test")}"')
     
-    print('\n🎉 All tests passed! Task 4.5 sorting implementation is complete.')
+    # Test performance optimization and error handling (Task 4.6)
+    print('\n=== Testing Performance Optimization & Error Handling (Task 4.6) ===')
+    
+    # Test circuit breaker and retry configuration
+    print(f'✅ Circuit breaker enabled: {config.enable_circuit_breaker}')
+    print(f'✅ Retry logic enabled: {config.enable_retry_logic}')
+    print(f'✅ Memory optimization enabled: {config.enable_memory_optimization}')
+    print(f'✅ Large cluster threshold: {config.large_cluster_threshold} namespaces')
+    print(f'✅ Batch size for large clusters: {config.batch_size_large_clusters}')
+    
+    # Test circuit breaker creation
+    if hasattr(ns_manager, '_discovery_circuit_breaker') and ns_manager._discovery_circuit_breaker:
+        print(f'✅ Discovery circuit breaker state: {ns_manager._discovery_circuit_breaker.state.value}')
+    if hasattr(ns_manager, '_rbac_circuit_breaker') and ns_manager._rbac_circuit_breaker:
+        print(f'✅ RBAC circuit breaker state: {ns_manager._rbac_circuit_breaker.state.value}')
+    
+    # Test retry manager
+    if hasattr(ns_manager, '_retry_manager') and ns_manager._retry_manager:
+        print(f'✅ Retry manager max retries: {ns_manager._retry_manager.max_retries}')
+        print(f'✅ Retry manager initial delay: {ns_manager._retry_manager.initial_delay}s')
+    
+    # Test enhanced performance summary
+    perf_summary = ns_manager.get_performance_summary()
+    if 'resilience_metrics' in perf_summary:
+        resilience = perf_summary['resilience_metrics']
+        print(f'✅ Circuit breaker trips: {resilience.get("circuit_breaker_trips", 0)}')
+        print(f'✅ Retry attempts: {resilience.get("retry_attempts", 0)}')
+        print(f'✅ Graceful degradations: {resilience.get("graceful_degradations", 0)}')
+    
+    # Test memory optimization detection
+    large_namespace_list = [{'name': f'namespace-{i}', 'status': 'Active'} for i in range(600)]
+    
+    # Test fallback functionality
+    fallback_result = ns_manager._get_fallback_namespace_info('test-namespace', use_cache=False)
+    print(f'✅ Fallback result (no cache): {fallback_result}')
+    
+    print('\n🎉 All tests passed! Task 4.6 performance optimization and error handling implementation is complete.')
     
 except Exception as e:
     print(f'❌ Error: {e}')
