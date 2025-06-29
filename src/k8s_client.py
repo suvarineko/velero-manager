@@ -574,37 +574,49 @@ class KubernetesClient:
             bool: True if session is valid, False otherwise
         """
         try:
-            # For multi-threaded operations, we can't rely on Streamlit session state
-            # Instead, check if we have the basic authentication components
-            if not hasattr(st, 'session_state'):
-                # In worker threads, session state is not available
-                # Check if we have authenticated user and API client
+            # Check if we're in a worker thread by looking for ScriptRunContext
+            import threading
+            current_thread = threading.current_thread()
+            is_main_thread = current_thread.name == 'MainThread'
+            
+            # For worker threads or when session state is not accessible
+            if not is_main_thread or not hasattr(st, 'session_state'):
+                # In worker threads, use basic authentication validation
+                is_valid = (self._current_user is not None and 
+                          self.api_client is not None and 
+                          self._session_id is not None)
+                self.logger.debug(f"Thread {current_thread.name}: Basic auth validation = {is_valid}")
+                return is_valid
+            
+            # In main thread, try full session state validation
+            try:
+                if 'k8s_client_session' not in st.session_state:
+                    return False
+                    
+                session = st.session_state['k8s_client_session']
+                
+                # Check session ID match
+                if session.get('session_id') != self._session_id:
+                    return False
+                    
+                # Check if session has required fields
+                required_fields = ['username', 'bearer_token', 'authenticated_at']
+                if not all(field in session for field in required_fields):
+                    return False
+                    
+                # Session is valid if it exists and has required fields
+                return True
+                
+            except Exception as session_error:
+                self.logger.debug(f"Session state validation failed: {session_error}")
+                # Fallback to basic validation
                 return (self._current_user is not None and 
                        self.api_client is not None and 
                        self._session_id is not None)
             
-            # In main thread, check full session state
-            if 'k8s_client_session' not in st.session_state:
-                return False
-                
-            session = st.session_state['k8s_client_session']
-            
-            # Check session ID match
-            if session.get('session_id') != self._session_id:
-                return False
-                
-            # Check if session has required fields
-            required_fields = ['username', 'bearer_token', 'authenticated_at']
-            if not all(field in session for field in required_fields):
-                return False
-                
-            # Session is valid if it exists and has required fields
-            # OAuth proxy handles token expiration, so we don't check token validity here
-            return True
-            
         except Exception as e:
-            self.logger.debug(f"Session validation check (thread-safe): {e}")
-            # Fallback for thread safety - check basic authentication components
+            self.logger.debug(f"Session validation error: {e}")
+            # Final fallback for thread safety
             return (self._current_user is not None and 
                    self.api_client is not None and 
                    self._session_id is not None)
