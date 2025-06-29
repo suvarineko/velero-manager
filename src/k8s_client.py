@@ -398,13 +398,30 @@ class KubernetesClient:
             elif self.config.api_server_url:
                 configuration.host = self.config.api_server_url
             else:
-                # Try to load from kubeconfig for host if not provided
+                # Try to load in-cluster configuration first (for pods running in Kubernetes)
                 try:
-                    config.load_kube_config()
-                    configuration.host = client.Configuration().host
-                except Exception as e:
-                    self.logger.error(f"No API server URL provided and unable to load from kubeconfig: {e}")
-                    return False
+                    config.load_incluster_config()
+                    # Get the configuration set by load_incluster_config()
+                    incluster_config = client.Configuration.get_default_copy()
+                    # Only take the host and SSL settings, not the authentication
+                    configuration.host = incluster_config.host
+                    configuration.ssl_ca_cert = incluster_config.ssl_ca_cert
+                    configuration.verify_ssl = incluster_config.verify_ssl
+                    self.logger.info("Successfully loaded in-cluster configuration")
+                except Exception as incluster_error:
+                    self.logger.debug(f"In-cluster config not available: {incluster_error}")
+                    # Fallback to kubeconfig for development/external use
+                    try:
+                        config.load_kube_config()
+                        kubeconfig_config = client.Configuration.get_default_copy()
+                        configuration.host = kubeconfig_config.host
+                        configuration.ssl_ca_cert = kubeconfig_config.ssl_ca_cert
+                        configuration.verify_ssl = kubeconfig_config.verify_ssl
+                        self.logger.info("Successfully loaded kubeconfig")
+                    except Exception as kubeconfig_error:
+                        self.logger.error(f"No API server URL provided and unable to load configuration: "
+                                        f"in-cluster error: {incluster_error}, kubeconfig error: {kubeconfig_error}")
+                        return False
             
             # Set bearer token
             configuration.api_key = {"authorization": f"Bearer {bearer_token}"}
