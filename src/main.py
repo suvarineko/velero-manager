@@ -30,9 +30,21 @@ st.set_page_config(
 def get_namespace_manager(bearer_token: str) -> Optional[NamespaceManager]:
     """Initialize and cache the namespace manager with Kubernetes client."""
     try:
-        # Configure Kubernetes client with bearer token from authentication
-        k8s_config = K8sClientConfig(bearer_token=bearer_token)
+        # Configure Kubernetes client
+        k8s_config = K8sClientConfig(
+            connection_timeout=30,
+            read_timeout=60,
+            max_retries=3,
+            enable_circuit_breaker=True,
+            resource_cache_ttl=300,  # 5 minutes
+            namespace_cache_ttl=600  # 10 minutes
+        )
         k8s_client = KubernetesClient(k8s_config)
+        
+        # Authenticate with bearer token
+        if not k8s_client.authenticate_with_token(bearer_token):
+            logging.error("Failed to authenticate with Kubernetes API")
+            return None
         
         # Create namespace manager with optimized configuration
         ns_config = NamespaceManagerConfig(
