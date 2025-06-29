@@ -1,2 +1,3 @@
 docker build --platform linux/amd64 -t registry.apps.k8s.ose-prod.solution.sbt/r4c-development/velero-manager:v1.0.0-$(git rev-parse --short HEAD) -f Dockerfile .
-# helm upgrade --install velero-manager ./ --create-namespace -n velero-manager -f values.yaml --set 
+skopeo --override-os linux --override-arch amd64 copy --preserve-digests --tls-verify=false docker-daemon:registry.apps.k8s.ose-prod.solution.sbt/r4c-development/velero-manager:v1.0.0-$(git rev-parse --short HEAD) docker://registry.apps.k8s.ose-prod.solution.sbt/r4c-development/velero-manager:v1.0.0-$(git rev-parse --short HEAD)
+helm upgrade --install velero-manager helm/velero-manager --create-namespace -n velero-manager -f helm/velero-manager/values.yaml --set image.tag=v1.0.0-$(git rev-parse --short HEAD)
