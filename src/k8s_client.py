@@ -574,7 +574,17 @@ class KubernetesClient:
             bool: True if session is valid, False otherwise
         """
         try:
-            if not hasattr(st, 'session_state') or 'k8s_client_session' not in st.session_state:
+            # For multi-threaded operations, we can't rely on Streamlit session state
+            # Instead, check if we have the basic authentication components
+            if not hasattr(st, 'session_state'):
+                # In worker threads, session state is not available
+                # Check if we have authenticated user and API client
+                return (self._current_user is not None and 
+                       self.api_client is not None and 
+                       self._session_id is not None)
+            
+            # In main thread, check full session state
+            if 'k8s_client_session' not in st.session_state:
                 return False
                 
             session = st.session_state['k8s_client_session']
@@ -593,8 +603,11 @@ class KubernetesClient:
             return True
             
         except Exception as e:
-            self.logger.error(f"Error checking session validity: {e}")
-            return False
+            self.logger.debug(f"Session validation check (thread-safe): {e}")
+            # Fallback for thread safety - check basic authentication components
+            return (self._current_user is not None and 
+                   self.api_client is not None and 
+                   self._session_id is not None)
     
     def refresh_session_from_state(self) -> bool:
         """
