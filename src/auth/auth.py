@@ -133,7 +133,7 @@ def validate_headers(headers: Dict[str, Any]) -> None:
                 logger.error("Authentication attempt failed: Authorization header must use Bearer scheme")
                 raise InvalidHeaderError("Authorization header must use Bearer authentication scheme")
             
-            if not auth_parts[1]:
+            if not auth_parts[1].strip():
                 logger.error("Authentication attempt failed: Empty bearer token")
                 raise InvalidHeaderError("Bearer token cannot be empty")
     
@@ -164,7 +164,7 @@ def validate_headers(headers: Dict[str, Any]) -> None:
             raise InvalidHeaderError("Username exceeds maximum length of 253 characters")
         
         # Check for obviously invalid characters (basic validation)
-        if any(char in username for char in ['<', '>', '"', "'", '&', ';', '\n', '\r', '\t']):
+        if any(char in username for char in ['<', '>', '"', "'", '&', ';', '\n', '\r', '\t', '\x00']):
             logger.error(f"Authentication attempt failed: Username contains invalid characters: {username}")
             raise InvalidHeaderError("Username contains invalid characters")
     
@@ -268,36 +268,49 @@ def _get_streamlit_headers() -> Dict[str, str]:
     """
     Get headers from Streamlit request context.
     
-    Note: This is a placeholder implementation since Streamlit doesn't 
-    directly expose request headers. In production, this would typically
-    be handled by the OAuth proxy injecting headers into the request.
+    Attempts to extract real HTTP headers from the Streamlit request context
+    in production, with fallbacks for development and testing scenarios.
     
     Returns:
-        Dictionary of headers
+        Dictionary of headers from OAuth proxy or development setup
     """
-    # In a real deployment with OAuth proxy, headers would be available
-    # through the web server configuration or Streamlit's request context
+    # Try to get real headers from Streamlit context (production)
+    try:
+        if hasattr(st, 'context') and hasattr(st.context, 'headers'):
+            headers = st.context.headers
+            if headers:
+                # Convert StreamlitHeaders to dictionary
+                real_headers = headers.to_dict()
+                if real_headers:
+                    logger.debug(f"Retrieved {len(real_headers)} headers from Streamlit context")
+                    return real_headers
+    except Exception as e:
+        logger.debug(f"Failed to get headers from Streamlit context: {e}")
     
-    # For development, we can check if headers are stored in session state
+    # For development, check if headers are stored in session state
     if hasattr(st, 'session_state') and 'auth_headers' in st.session_state:
+        logger.debug("Using headers from session state (development)")
         return st.session_state.auth_headers
     
-    # Development fallback - could be set via environment or config
+    # Development fallback - environment variables
     import os
-    dev_headers = {}
-    
     if os.getenv('DEV_MODE', '').lower() == 'true':
         dev_headers = {
             'X-Forwarded-User': os.getenv('DEV_USER', ''),
             'X-Forwarded-Preferred-Username': os.getenv('DEV_PREFERRED_USERNAME', ''),
             'X-Forwarded-Groups': os.getenv('DEV_GROUPS', ''),
-            'Authorization': f"Bearer {os.getenv('DEV_TOKEN', '')}"
+            'Authorization': f"Bearer {os.getenv('DEV_TOKEN', '')}" if os.getenv('DEV_TOKEN') else ""
         }
+        
+        # Filter out empty values
+        dev_headers = {k: v for k, v in dev_headers.items() if v}
         
         # Only return if we have at least a username
         if dev_headers.get('X-Forwarded-User'):
+            logger.debug(f"Using development headers for user: {dev_headers.get('X-Forwarded-User')}")
             return dev_headers
     
+    logger.debug("No headers found in any context")
     return {}
 
 
