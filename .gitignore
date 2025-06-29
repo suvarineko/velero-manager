@@ -134,7 +134,7 @@ config
 .idea/
 *.swp
 *.swo
-*~
+# *~
 
 # OS
 .DS_Store
@@ -151,3 +151,13 @@ Thumbs.db
 helm/charts/
 helm/*/charts/
 helm/*/Chart.lock
+
+.claude
+.cursor
+.roo
+.taskmaster
+.env.example
+.roomodes
+.windsurfrules
+prd.txt
+memory-bank
