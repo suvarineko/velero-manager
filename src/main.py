@@ -84,11 +84,21 @@ def get_namespace_manager(user_info) -> Optional[NamespaceManager]:
         return None
 
 
-def load_namespaces(namespace_manager: NamespaceManager) -> tuple[List[NamespaceInfo], Optional[str]]:
-    """Load namespaces with error handling and return (namespaces, error_message)."""
+def load_namespaces(namespace_manager: NamespaceManager, force_refresh: bool = False) -> tuple[List[NamespaceInfo], Optional[str]]:
+    """
+    Load namespaces with error handling and return (namespaces, error_message).
+    
+    Args:
+        namespace_manager: The NamespaceManager instance
+        force_refresh: If True, bypass all caches and fetch fresh data
+                      If False, use cached data if available
+    """
     try:
-        # Discover namespaces with RBAC filtering
-        namespaces = namespace_manager.discover_namespaces(include_rbac_check=True)
+        # Discover namespaces with RBAC filtering and appropriate caching behavior
+        namespaces = namespace_manager.discover_namespaces(
+            include_rbac_check=True,
+            force_refresh=force_refresh
+        )
         
         # Sort namespaces by name (ascending, case-insensitive)
         sorted_namespaces = namespace_manager.sort_namespaces(namespaces, SortOrder.NAME_ASC)
@@ -226,10 +236,17 @@ def show_main_interface(user):
             with col_ns2:
                 refresh_clicked = st.button("🔄", help="Refresh namespace list", key="refresh_ns")
             
-            # Load namespaces with caching and error handling
-            if refresh_clicked or 'namespaces_data' not in st.session_state:
+            # Load namespaces with appropriate caching behavior
+            if refresh_clicked:
+                # Manual refresh - bypass all caches to get fresh data
+                with st.spinner("Refreshing namespaces..."):
+                    namespaces, error_msg = load_namespaces(namespace_manager, force_refresh=True)
+                    st.session_state.namespaces_data = namespaces
+                    st.session_state.namespaces_error = error_msg
+            elif 'namespaces_data' not in st.session_state:
+                # Page reload/first load - use cache if available
                 with st.spinner("Loading namespaces..."):
-                    namespaces, error_msg = load_namespaces(namespace_manager)
+                    namespaces, error_msg = load_namespaces(namespace_manager, force_refresh=False)
                     st.session_state.namespaces_data = namespaces
                     st.session_state.namespaces_error = error_msg
             
