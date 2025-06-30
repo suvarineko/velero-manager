@@ -177,12 +177,18 @@ class NamespaceManagerConfig:
     rbac_check_timeout: float = 30.0
     
     # Admin permission definitions  
+    # admin_verbs: Set[str] = field(default_factory=lambda: {
+    #     'create', 'delete', 'deletecollection', 'patch', 'update'
+    # })
     admin_verbs: Set[str] = field(default_factory=lambda: {
-        'create', 'delete', 'deletecollection', 'patch', 'update'
+        'delete'
     })
+    # admin_resources: Set[str] = field(default_factory=lambda: {
+    #     'pods', 'deployments', 'secrets', 'configmaps', 'services',
+    #     'persistentvolumeclaims', 'roles', 'rolebindings'
+    # })
     admin_resources: Set[str] = field(default_factory=lambda: {
-        'pods', 'deployments', 'secrets', 'configmaps', 'services',
-        'persistentvolumeclaims', 'roles', 'rolebindings'
+        'pods'
     })
     
     # Admin access requires ALL permissions to pass (no threshold)
