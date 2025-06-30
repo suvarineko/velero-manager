@@ -282,8 +282,25 @@ def _get_streamlit_headers() -> Dict[str, str]:
                 # Convert StreamlitHeaders to dictionary
                 real_headers = headers.to_dict()
                 if real_headers:
-                    logger.debug(f"Retrieved {len(real_headers)} headers from Streamlit context")
-                    return real_headers
+                    # Fix UTF-8 encoding issue for Cyrillic characters
+                    # OAuth proxy headers may contain UTF-8 encoded as Latin-1
+                    fixed_headers = {}
+                    for key, value in real_headers.items():
+                        if isinstance(value, str):
+                            try:
+                                # Try to fix UTF-8 bytes interpreted as Latin-1
+                                fixed_value = value.encode('latin1').decode('utf-8')
+                                fixed_headers[key] = fixed_value
+                                if value != fixed_value:
+                                    logger.debug(f"Fixed encoding for header {key}: {repr(value)} -> {repr(fixed_value)}")
+                            except (UnicodeEncodeError, UnicodeDecodeError):
+                                # If encoding fix fails, use original value
+                                fixed_headers[key] = value
+                        else:
+                            fixed_headers[key] = value
+                    
+                    logger.debug(f"Retrieved {len(fixed_headers)} headers from Streamlit context")
+                    return fixed_headers
     except Exception as e:
         logger.debug(f"Failed to get headers from Streamlit context: {e}")
     
