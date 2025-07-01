@@ -279,7 +279,11 @@ class VeleroClientConfig:
     binary_path: str = "/usr/local/bin/velero"
     default_backup_ttl: str = "720h"
     backup_storage_location: str = "default"
-    command_timeout: int = 300  # 5 minutes for backup/restore operations
+    
+    # Timeout configuration - two categories for different operation types
+    quick_operation_timeout: int = 60    # 1 minute for list, get, status operations
+    long_operation_timeout: int = 1800   # 30 minutes for backup, restore operations
+    command_timeout: int = 300           # Fallback timeout (5 minutes)
     
     # Retry configuration (same defaults as k8s_client)
     max_retries: int = 3
@@ -407,6 +411,42 @@ class VeleroCommand:
     def build(self) -> List[str]:
         """Build and return the final command arguments."""
         return self.args.copy()
+    
+    def get_operation_type(self) -> str:
+        """
+        Determine the operation type from command arguments.
+        
+        Returns:
+            'long' for long-running operations, 'quick' for quick operations
+        """
+        if len(self.args) < 2:
+            return 'quick'  # Default for simple commands
+        
+        # Check for long-running operations
+        long_operations = {
+            ('backup', 'create'),
+            ('restore', 'create'),
+        }
+        
+        # Check for quick operations  
+        quick_operations = {
+            ('backup', 'get'),
+            ('backup', 'describe'),
+            ('restore', 'get'),
+            ('restore', 'describe'),
+            ('version',),
+            ('get',),
+        }
+        
+        # Extract command parts (skip binary path)
+        command_parts = tuple(self.args[1:3]) if len(self.args) >= 3 else tuple(self.args[1:])
+        
+        if command_parts in long_operations:
+            return 'long'
+        elif command_parts in quick_operations or command_parts[:1] in quick_operations:
+            return 'quick'
+        else:
+            return 'quick'  # Default to quick for unknown operations
 
 
 class VeleroClient:
@@ -476,6 +516,42 @@ class VeleroClient:
         # Validate namespace format
         if not self.config.velero_namespace or not self.config.velero_namespace.strip():
             raise VeleroConfigurationError("Velero namespace cannot be empty")
+        
+        # Validate timeout configurations
+        if self.config.quick_operation_timeout <= 0:
+            raise VeleroConfigurationError("Quick operation timeout must be positive")
+        if self.config.long_operation_timeout <= 0:
+            raise VeleroConfigurationError("Long operation timeout must be positive")
+        if self.config.command_timeout <= 0:
+            raise VeleroConfigurationError("Command timeout must be positive")
+        
+        # Validate timeout ranges (quick should be less than long)
+        if self.config.quick_operation_timeout >= self.config.long_operation_timeout:
+            raise VeleroConfigurationError(
+                f"Quick operation timeout ({self.config.quick_operation_timeout}s) should be less than "
+                f"long operation timeout ({self.config.long_operation_timeout}s)"
+            )
+        
+        # Validate reasonable timeout limits
+        if self.config.quick_operation_timeout > 300:  # 5 minutes
+            self.logger.warning(f"Quick operation timeout ({self.config.quick_operation_timeout}s) seems high")
+        if self.config.long_operation_timeout > 7200:  # 2 hours
+            self.logger.warning(f"Long operation timeout ({self.config.long_operation_timeout}s) seems very high")
+        
+        # Validate namespace name format (basic Kubernetes naming rules)
+        import re
+        if not re.match(r'^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$', self.config.velero_namespace):
+            raise VeleroConfigurationError(
+                f"Invalid namespace format: '{self.config.velero_namespace}'. "
+                "Must be lowercase alphanumeric with hyphens, starting and ending with alphanumeric."
+            )
+        
+        # Validate TTL format (basic check)
+        if not re.match(r'^\d+[hms]$', self.config.default_backup_ttl):
+            raise VeleroConfigurationError(
+                f"Invalid backup TTL format: '{self.config.default_backup_ttl}'. "
+                "Must be a number followed by 'h', 'm', or 's' (e.g., '720h', '30m', '3600s')"
+            )
         
         self.logger.debug("Velero client configuration validated successfully")
     
@@ -594,6 +670,18 @@ users:
         cmd_args = command.build()
         kubeconfig_path = None
         
+        # Determine appropriate timeout based on operation type
+        operation_type = command.get_operation_type()
+        if operation_type == 'long':
+            timeout = self.config.long_operation_timeout
+            self.logger.debug(f"Using long operation timeout: {timeout}s")
+        elif operation_type == 'quick':
+            timeout = self.config.quick_operation_timeout
+            self.logger.debug(f"Using quick operation timeout: {timeout}s")
+        else:
+            timeout = self.config.command_timeout
+            self.logger.debug(f"Using fallback timeout: {timeout}s")
+        
         try:
             # Create temporary kubeconfig for authentication
             kubeconfig_path = self._create_kubeconfig_file()
@@ -602,14 +690,14 @@ users:
             env = os.environ.copy()
             env["KUBECONFIG"] = kubeconfig_path
             
-            self.logger.info(f"Executing Velero command: {' '.join(cmd_args)}")
+            self.logger.info(f"Executing Velero command ({operation_type} operation): {' '.join(cmd_args)}")
             
-            # Execute command
+            # Execute command with operation-specific timeout
             result = subprocess.run(
                 cmd_args,
                 capture_output=True,
                 text=True,
-                timeout=self.config.command_timeout,
+                timeout=timeout,
                 env=env
             )
             
@@ -629,7 +717,7 @@ users:
             return command_result
             
         except subprocess.TimeoutExpired:
-            error_msg = f"Velero command timed out after {self.config.command_timeout} seconds"
+            error_msg = f"Velero {operation_type} operation timed out after {timeout} seconds"
             self.logger.error(error_msg)
             raise VeleroBinaryError(error_msg)
         except FileNotFoundError:
@@ -939,6 +1027,117 @@ users:
     def is_authenticated(self) -> bool:
         """Check if client is properly authenticated."""
         return self.k8s_client.is_authenticated()
+    
+    def health_check(self) -> Dict[str, Any]:
+        """
+        Perform a basic health check of the Velero installation.
+        
+        Returns:
+            Dictionary with health check results
+        """
+        health_status = {
+            "overall_status": "unknown",
+            "checks": {
+                "binary_accessible": False,
+                "version_command": False,
+                "cluster_connectivity": False,
+                "authentication": False
+            },
+            "details": {},
+            "errors": []
+        }
+        
+        try:
+            # Check 1: Binary accessibility (already covered in validation, but let's be explicit)
+            try:
+                if Path(self.config.binary_path).exists() and os.access(self.config.binary_path, os.X_OK):
+                    health_status["checks"]["binary_accessible"] = True
+                    health_status["details"]["binary_path"] = self.config.binary_path
+                else:
+                    health_status["errors"].append(f"Velero binary not accessible at {self.config.binary_path}")
+            except Exception as e:
+                health_status["errors"].append(f"Binary check failed: {e}")
+            
+            # Check 2: Velero version command
+            try:
+                version_command = VeleroCommand(self.config.binary_path, self.config.velero_namespace)
+                version_command.args.extend(["version", "--client-only"])
+                
+                # Execute version command (this should be quick)
+                result = subprocess.run(
+                    version_command.build(),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.quick_operation_timeout
+                )
+                
+                if result.returncode == 0:
+                    health_status["checks"]["version_command"] = True
+                    # Extract version info if available
+                    if "Version:" in result.stdout:
+                        health_status["details"]["client_version"] = result.stdout.strip()
+                else:
+                    health_status["errors"].append(f"Version command failed: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                health_status["errors"].append("Version command timed out")
+            except Exception as e:
+                health_status["errors"].append(f"Version command error: {e}")
+            
+            # Check 3: Authentication status
+            try:
+                if self.is_authenticated():
+                    health_status["checks"]["authentication"] = True
+                    user_info = self.get_current_user()
+                    if user_info:
+                        health_status["details"]["authenticated_user"] = user_info.username
+                else:
+                    health_status["errors"].append("Not authenticated with Kubernetes cluster")
+            except Exception as e:
+                health_status["errors"].append(f"Authentication check failed: {e}")
+            
+            # Check 4: Basic cluster connectivity (try to get server version through Velero)
+            try:
+                if health_status["checks"]["authentication"]:
+                    # Try a simple velero command that requires cluster access
+                    server_version_command = VeleroCommand(self.config.binary_path, self.config.velero_namespace)
+                    server_version_command.args.extend(["version"])
+                    
+                    result = self._execute_command(server_version_command)
+                    if result.success:
+                        health_status["checks"]["cluster_connectivity"] = True
+                        if "Server:" in result.stdout:
+                            health_status["details"]["server_version"] = result.stdout.strip()
+                    else:
+                        health_status["errors"].append("Failed to connect to Velero server in cluster")
+                else:
+                    health_status["errors"].append("Skipping cluster connectivity check (not authenticated)")
+                    
+            except Exception as e:
+                health_status["errors"].append(f"Cluster connectivity check failed: {e}")
+            
+            # Determine overall status
+            passed_checks = sum(health_status["checks"].values())
+            total_checks = len(health_status["checks"])
+            
+            if passed_checks == total_checks:
+                health_status["overall_status"] = "healthy"
+            elif passed_checks >= total_checks / 2:
+                health_status["overall_status"] = "degraded"
+            else:
+                health_status["overall_status"] = "unhealthy"
+            
+            health_status["details"]["passed_checks"] = f"{passed_checks}/{total_checks}"
+            
+            self.logger.info(f"Health check completed: {health_status['overall_status']} ({passed_checks}/{total_checks} checks passed)")
+            
+            return health_status
+            
+        except Exception as e:
+            health_status["overall_status"] = "error"
+            health_status["errors"].append(f"Health check failed: {e}")
+            self.logger.error(f"Health check encountered error: {e}")
+            return health_status
 
 
 def get_velero_client(k8s_client: KubernetesClient, 
