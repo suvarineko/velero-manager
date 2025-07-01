@@ -907,22 +907,205 @@ users:
         
         return self._execute_command(command)
     
-    def list_backups(self, output_format: str = "json") -> List[Dict[str, Any]]:
+    def _filter_backups_by_namespace(self, backups: List[Dict[str, Any]], 
+                                    namespace: str) -> List[Dict[str, Any]]:
         """
-        List all Velero backups and return structured data.
+        Filter backups by namespace using the naming pattern: {namespace}-{timestamp}-{username}
         
         Args:
-            output_format: Output format for velero command (default: "json")
+            backups: List of backup dictionaries
+            namespace: Namespace to filter by
             
         Returns:
-            List of backup information dictionaries
+            List of filtered backup dictionaries
+        """
+        filtered_backups = []
+        namespace_prefix = f"{namespace}-"
+        
+        for backup in backups:
+            try:
+                # Get backup name from metadata
+                backup_name = backup.get("metadata", {}).get("name", "")
+                
+                # Check if backup name starts with namespace prefix
+                if backup_name.startswith(namespace_prefix):
+                    # Additional validation: ensure it follows the full pattern
+                    # Expected pattern: {namespace}-{timestamp}-{username}
+                    name_parts = backup_name.split("-")
+                    
+                    # Should have at least 3 parts: namespace, timestamp, username
+                    # Timestamp format: YYYY-MM-DD-HHMMSS (contains additional hyphens)
+                    # So we expect: namespace, YYYY, MM, DD, HHMMSS, username (6+ parts)
+                    if len(name_parts) >= 6:
+                        # Check if it has valid timestamp format (YYYY-MM-DD)
+                        if (len(name_parts[1]) == 4 and name_parts[1].isdigit() and  # Year
+                            len(name_parts[2]) == 2 and name_parts[2].isdigit() and  # Month
+                            len(name_parts[3]) == 2 and name_parts[3].isdigit()):    # Day
+                            
+                            # Validate date ranges
+                            year = int(name_parts[1])
+                            month = int(name_parts[2])
+                            day = int(name_parts[3])
+                            
+                            if (1900 <= year <= 2100 and  # Reasonable year range
+                                1 <= month <= 12 and      # Valid month
+                                1 <= day <= 31):          # Valid day (basic check)
+                                filtered_backups.append(backup)
+                                self.logger.debug(f"Backup '{backup_name}' matches namespace '{namespace}' pattern")
+                            else:
+                                self.logger.debug(f"Backup '{backup_name}' starts with namespace but has invalid date values")
+                        else:
+                            self.logger.debug(f"Backup '{backup_name}' starts with namespace but doesn't match timestamp pattern")
+                    else:
+                        self.logger.debug(f"Backup '{backup_name}' starts with namespace but has insufficient parts")
+                else:
+                    self.logger.debug(f"Backup '{backup_name}' doesn't start with namespace prefix '{namespace_prefix}'")
+                    
+            except Exception as e:
+                self.logger.warning(f"Error processing backup for namespace filtering: {e}")
+                # Skip malformed backup entries
+                continue
+        
+        return filtered_backups
+    
+    def parse_backup_metadata(self, backup: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse backup metadata from Velero backup object.
+        
+        Args:
+            backup: Raw backup object from Velero API
+            
+        Returns:
+            Dictionary with parsed metadata including:
+            - name: Backup name
+            - creation_timestamp: Python datetime object (or None if parsing fails)
+            - expiration_date: Python datetime object (or None if parsing fails)
+            - status: Backup status/phase
+            - labels: Dictionary of labels (or empty dict if not available)
+            - errors: List of parsing errors encountered
+            - raw_timestamps: Dictionary of original timestamp strings for debugging
+        """
+        from datetime import datetime
+        import re
+        
+        parsed_metadata = {
+            "name": None,
+            "creation_timestamp": None,
+            "expiration_date": None,
+            "status": "Unknown",
+            "phase": "Unknown",
+            "labels": {},
+            "errors": [],
+            "raw_timestamps": {}
+        }
+        
+        try:
+            # Extract basic metadata
+            metadata = backup.get("metadata", {})
+            status_info = backup.get("status", {})
+            
+            # Parse backup name
+            parsed_metadata["name"] = metadata.get("name", "")
+            if not parsed_metadata["name"]:
+                parsed_metadata["errors"].append("Missing backup name")
+            
+            # Parse creation timestamp
+            creation_ts = metadata.get("creationTimestamp")
+            if creation_ts:
+                parsed_metadata["raw_timestamps"]["creation"] = creation_ts
+                try:
+                    # Handle common Kubernetes timestamp formats
+                    # Format: 2024-06-30T14:30:00Z or 2024-06-30T14:30:00.123456Z
+                    clean_ts = re.sub(r'\.\d+Z$', 'Z', creation_ts)  # Remove microseconds
+                    clean_ts = clean_ts.replace('Z', '+00:00')  # Convert Z to timezone offset
+                    parsed_metadata["creation_timestamp"] = datetime.fromisoformat(clean_ts)
+                except (ValueError, TypeError) as e:
+                    parsed_metadata["errors"].append(f"Failed to parse creation timestamp '{creation_ts}': {e}")
+                    self.logger.warning(f"Failed to parse creation timestamp for backup '{parsed_metadata['name']}': {e}")
+            else:
+                parsed_metadata["errors"].append("Missing creation timestamp")
+            
+            # Parse expiration date (if available)
+            # Velero stores this in status.expiration or metadata.labels
+            expiration = status_info.get("expiration")
+            if not expiration:
+                # Check labels for TTL information
+                labels = metadata.get("labels", {})
+                expiration = labels.get("velero.io/expiration")
+            
+            if expiration:
+                parsed_metadata["raw_timestamps"]["expiration"] = expiration
+                try:
+                    clean_exp = re.sub(r'\.\d+Z$', 'Z', expiration)
+                    clean_exp = clean_exp.replace('Z', '+00:00')
+                    parsed_metadata["expiration_date"] = datetime.fromisoformat(clean_exp)
+                except (ValueError, TypeError) as e:
+                    parsed_metadata["errors"].append(f"Failed to parse expiration date '{expiration}': {e}")
+                    self.logger.warning(f"Failed to parse expiration date for backup '{parsed_metadata['name']}': {e}")
+            
+            # Parse status and phase
+            parsed_metadata["phase"] = status_info.get("phase", "Unknown")
+            parsed_metadata["status"] = parsed_metadata["phase"]  # Use phase as primary status
+            
+            # Parse labels (simple key-value extraction)
+            labels = metadata.get("labels", {})
+            if isinstance(labels, dict):
+                parsed_metadata["labels"] = labels.copy()
+            else:
+                parsed_metadata["labels"] = {}  # Reset to empty dict for invalid labels
+                parsed_metadata["errors"].append(f"Labels field is not a dictionary: {type(labels)}")
+                self.logger.warning(f"Invalid labels format for backup '{parsed_metadata['name']}': expected dict, got {type(labels)}")
+            
+            # Add commonly used label extractions
+            if parsed_metadata["labels"] and isinstance(parsed_metadata["labels"], dict):
+                # Extract creator information if available
+                creator_labels = [
+                    "velero.io/created-by",
+                    "kubernetes.io/created-by", 
+                    "app.kubernetes.io/created-by",
+                    "creator"
+                ]
+                parsed_metadata["creator"] = "Unknown"  # Default value
+                for label_key in creator_labels:
+                    if label_key in parsed_metadata["labels"]:
+                        parsed_metadata["creator"] = parsed_metadata["labels"][label_key]
+                        break
+            else:
+                parsed_metadata["creator"] = "Unknown"
+            
+            self.logger.debug(f"Successfully parsed metadata for backup '{parsed_metadata['name']}'")
+            
+        except Exception as e:
+            error_msg = f"Unexpected error parsing backup metadata: {e}"
+            parsed_metadata["errors"].append(error_msg)
+            self.logger.error(f"Error parsing backup metadata: {e}")
+        
+        return parsed_metadata
+    
+    def list_backups(self, namespace: Optional[str] = None, 
+                     output_format: str = "json", 
+                     include_parsed_metadata: bool = False) -> List[Dict[str, Any]]:
+        """
+        List Velero backups and return structured data.
+        
+        Args:
+            namespace: Optional namespace filter to show backups for specific namespace only
+            output_format: Output format for velero command (default: "json")
+            include_parsed_metadata: If True, include parsed metadata for each backup
+            
+        Returns:
+            List of backup information dictionaries. If include_parsed_metadata is True,
+            each backup will have an additional 'parsed_metadata' field.
             
         Raises:
             VeleroCommandError: If velero command fails after retries
             VeleroCircuitBreakerError: If circuit breaker is open
             VeleroParsingError: If output parsing fails
         """
-        self.logger.info("Listing all Velero backups")
+        if namespace:
+            self.logger.info(f"Listing Velero backups for namespace: {namespace}")
+        else:
+            self.logger.info("Listing all Velero backups")
         
         # Build get backups command with JSON output
         command = VeleroCommand(self.config.binary_path, self.config.velero_namespace)
@@ -936,6 +1119,19 @@ users:
             backups = parsed_output.get("items", [])
             for backup in backups:
                 self._validate_backup_object(backup)
+            
+            # Apply namespace filtering if specified
+            if namespace:
+                filtered_backups = self._filter_backups_by_namespace(backups, namespace)
+                self.logger.info(f"Filtered {len(backups)} backups to {len(filtered_backups)} for namespace '{namespace}'")
+                backups = filtered_backups
+            
+            # Add parsed metadata if requested
+            if include_parsed_metadata:
+                self.logger.debug(f"Parsing metadata for {len(backups)} backups")
+                for backup in backups:
+                    backup["parsed_metadata"] = self.parse_backup_metadata(backup)
+                self.logger.info(f"Successfully parsed metadata for {len(backups)} backups")
             
             return backups
                 
