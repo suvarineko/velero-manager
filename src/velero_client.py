@@ -80,6 +80,62 @@ class VeleroRetryableError(VeleroBaseException):
     pass
 
 
+# Granular Exception Classes for Specific Velero Scenarios
+class VeleroError(VeleroBaseException):
+    """General Velero operation error."""
+    pass
+
+
+class VeleroParsingError(VeleroBaseException):
+    """Raised when Velero output cannot be parsed."""
+    pass
+
+
+class BackupNotFoundError(VeleroBaseException):
+    """Raised when a requested backup does not exist."""
+    pass
+
+
+class BackupInProgressError(VeleroBaseException):
+    """Raised when trying to operate on a backup that is still in progress."""
+    pass
+
+
+class BackupFailedError(VeleroBaseException):
+    """Raised when a backup operation has failed."""
+    pass
+
+
+class BackupCompletedError(VeleroBaseException):
+    """Raised when trying to modify a completed backup."""
+    pass
+
+
+class RestoreNotFoundError(VeleroBaseException):
+    """Raised when a requested restore does not exist."""
+    pass
+
+
+class RestoreInProgressError(VeleroBaseException):
+    """Raised when trying to operate on a restore that is still in progress."""
+    pass
+
+
+class RestoreFailedError(VeleroBaseException):
+    """Raised when a restore operation has failed."""
+    pass
+
+
+class RestorePartialFailureError(VeleroBaseException):
+    """Raised when a restore completes with partial failures."""
+    pass
+
+
+class RestoreCompletedError(VeleroBaseException):
+    """Raised when trying to modify a completed restore."""
+    pass
+
+
 @dataclass
 class CircuitBreaker:
     """
@@ -585,6 +641,122 @@ users:
             if kubeconfig_path and os.path.exists(kubeconfig_path):
                 os.unlink(kubeconfig_path)
     
+    def _parse_output(self, result: VeleroCommandResult, expected_format: str = "json") -> Dict[str, Any]:
+        """
+        Parse Velero command output into structured Python objects.
+        
+        Args:
+            result: VeleroCommandResult from command execution
+            expected_format: Expected output format (currently only "json" supported)
+            
+        Returns:
+            Parsed output as dictionary
+            
+        Raises:
+            VeleroParsingError: If output cannot be parsed
+            VeleroCommandError: If command failed
+        """
+        # Check if command was successful
+        if not result.success:
+            self.logger.error(f"Velero command failed (exit code {result.exit_code}): {result.stderr}")
+            raise VeleroCommandError(
+                f"Velero command failed: {result.stderr or 'Unknown error'}", 
+                exit_code=result.exit_code,
+                stderr=result.stderr
+            )
+        
+        # Validate that we have output
+        if not result.stdout or not result.stdout.strip():
+            self.logger.warning("Velero command returned empty output")
+            return {"items": []}
+        
+        # Currently only supporting JSON format
+        if expected_format.lower() != "json":
+            raise VeleroParsingError(f"Unsupported output format: {expected_format}")
+        
+        try:
+            import json
+            data = json.loads(result.stdout.strip())
+            
+            # Basic validation - ensure we have valid JSON structure
+            if not isinstance(data, (dict, list)):
+                raise VeleroParsingError(f"Invalid JSON structure: expected dict or list, got {type(data)}")
+            
+            # Normalize Velero output format
+            if isinstance(data, dict):
+                # Velero typically returns {"items": [...]} or {"kind": "...", "metadata": {...}}
+                if "items" in data:
+                    # List response (e.g., backup list, restore list)
+                    if not isinstance(data["items"], list):
+                        raise VeleroParsingError("Invalid JSON structure: 'items' field must be a list")
+                    return data
+                elif "kind" in data and "metadata" in data:
+                    # Single resource response
+                    return {"items": [data]}
+                else:
+                    # Unexpected structure, but valid JSON
+                    self.logger.warning(f"Unexpected JSON structure: {list(data.keys())}")
+                    return {"items": [data]}
+            elif isinstance(data, list):
+                # Direct list response
+                return {"items": data}
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON output: {e}")
+            self.logger.debug(f"Raw output was: {result.stdout[:500]}...")
+            raise VeleroParsingError(f"Invalid JSON output from Velero: {e}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error parsing Velero output: {e}")
+            raise VeleroParsingError(f"Failed to parse Velero output: {e}")
+    
+    def _validate_backup_object(self, backup: Dict[str, Any]) -> None:
+        """
+        Validate a backup object has required fields.
+        
+        Args:
+            backup: Backup object dictionary
+            
+        Raises:
+            VeleroParsingError: If backup object is invalid
+        """
+        if not isinstance(backup, dict):
+            raise VeleroParsingError("Backup object must be a dictionary")
+        
+        # Check for required metadata
+        if "metadata" not in backup:
+            raise VeleroParsingError("Backup object missing 'metadata' field")
+        
+        metadata = backup["metadata"]
+        if not isinstance(metadata, dict):
+            raise VeleroParsingError("Backup metadata must be a dictionary")
+        
+        if "name" not in metadata:
+            raise VeleroParsingError("Backup metadata missing 'name' field")
+    
+    def _validate_restore_object(self, restore: Dict[str, Any]) -> None:
+        """
+        Validate a restore object has required fields.
+        
+        Args:
+            restore: Restore object dictionary
+            
+        Raises:
+            VeleroParsingError: If restore object is invalid
+        """
+        if not isinstance(restore, dict):
+            raise VeleroParsingError("Restore object must be a dictionary")
+        
+        # Check for required metadata
+        if "metadata" not in restore:
+            raise VeleroParsingError("Restore object missing 'metadata' field")
+        
+        metadata = restore["metadata"]
+        if not isinstance(metadata, dict):
+            raise VeleroParsingError("Restore metadata must be a dictionary")
+        
+        if "name" not in metadata:
+            raise VeleroParsingError("Restore metadata missing 'name' field")
+    
     def create_backup(self, name: str, include_namespaces: Optional[List[str]] = None, 
                      ttl: Optional[str] = None, **kwargs) -> VeleroCommandResult:
         """
@@ -660,6 +832,7 @@ users:
         Raises:
             VeleroCommandError: If velero command fails after retries
             VeleroCircuitBreakerError: If circuit breaker is open
+            VeleroParsingError: If output parsing fails
         """
         self.logger.info("Listing all Velero backups")
         
@@ -669,52 +842,40 @@ users:
         
         try:
             result = self._execute_command(command)
+            parsed_output = self._parse_output(result, expected_format=output_format)
             
-            if not result.success:
-                self.logger.error(f"Failed to list backups: {result.stderr}")
-                return []
+            # Validate each backup object
+            backups = parsed_output.get("items", [])
+            for backup in backups:
+                self._validate_backup_object(backup)
             
-            # Parse JSON output if requested
-            if output_format.lower() == "json":
-                import json
-                try:
-                    if result.stdout.strip():
-                        data = json.loads(result.stdout)
-                        # Velero JSON output structure: {"items": [...]}
-                        if isinstance(data, dict) and "items" in data:
-                            return data["items"]
-                        elif isinstance(data, list):
-                            return data
-                        else:
-                            self.logger.warning(f"Unexpected JSON structure in backup list: {type(data)}")
-                            return []
-                    else:
-                        # Empty output means no backups
-                        return []
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to parse JSON output from velero: {e}")
-                    return []
-            else:
-                # For non-JSON formats, return raw output as single item
-                return [{"raw_output": result.stdout}] if result.stdout.strip() else []
+            return backups
                 
-        except (VeleroCommandError, VeleroCircuitBreakerError) as e:
+        except (VeleroCommandError, VeleroCircuitBreakerError, VeleroParsingError) as e:
             self.logger.error(f"Error listing backups: {e}")
-            # Return empty list instead of raising - let UI handle the error display
-            return []
+            # Re-raise specific exceptions for UI to handle appropriately
+            raise
         except Exception as e:
             self.logger.error(f"Unexpected error listing backups: {e}")
-            return []
+            raise VeleroError(f"Failed to list backups: {e}")
     
-    def get_backup_status(self, backup_name: str) -> str:
+    def get_backup_status(self, backup_name: str, raise_on_error: bool = False) -> str:
         """
         Get the status of a specific Velero backup.
         
         Args:
             backup_name: Name of the backup to check
+            raise_on_error: If True, raise specific exceptions; if False, return error strings
             
         Returns:
-            Status string (e.g., "Completed", "InProgress", "Failed", "NotFound")
+            Status string (e.g., "Completed", "InProgress", "Failed", "NotFound", "Error")
+            
+        Raises:
+            When raise_on_error=True:
+                BackupNotFoundError: If backup doesn't exist
+                BackupInProgressError: If backup is currently in progress
+                BackupFailedError: If backup has failed
+                VeleroError: For other backup-related errors
         """
         self.logger.info(f"Getting status for backup: {backup_name}")
         
@@ -731,6 +892,15 @@ users:
                     status = backup.get("status", {})
                     if isinstance(status, dict):
                         phase = status.get("phase", "Unknown")
+                        
+                        # Handle based on raise_on_error flag
+                        if raise_on_error:
+                            if phase.lower() == "inprogress":
+                                raise BackupInProgressError(f"Backup '{backup_name}' is currently in progress")
+                            elif phase.lower() in ["failed", "partiallyfailed"]:
+                                error_msg = status.get("errors", "Unknown error")
+                                raise BackupFailedError(f"Backup '{backup_name}' failed: {error_msg}")
+                        
                         return phase
                     elif isinstance(status, str):
                         return status
@@ -738,11 +908,29 @@ users:
                         return "Unknown"
             
             # Backup not found
-            return "NotFound"
+            if raise_on_error:
+                raise BackupNotFoundError(f"Backup '{backup_name}' not found")
+            else:
+                return "NotFound"
             
-        except Exception as e:
+        except (BackupNotFoundError, BackupInProgressError, BackupFailedError):
+            # Re-raise specific backup exceptions only if raise_on_error is True
+            if raise_on_error:
+                raise
+            else:
+                return "Error"
+        except (VeleroCommandError, VeleroCircuitBreakerError, VeleroParsingError) as e:
             self.logger.error(f"Error getting backup status for '{backup_name}': {e}")
-            return "Error"
+            if raise_on_error:
+                raise VeleroError(f"Failed to get backup status: {e}")
+            else:
+                return "Error"
+        except Exception as e:
+            self.logger.error(f"Unexpected error getting backup status for '{backup_name}': {e}")
+            if raise_on_error:
+                raise VeleroError(f"Unexpected error getting backup status: {e}")
+            else:
+                return "Error"
     
     def get_current_user(self) -> Optional[UserInfo]:
         """Get current authenticated user from Kubernetes client."""
