@@ -647,6 +647,103 @@ users:
         
         return self._execute_command(command)
     
+    def list_backups(self, output_format: str = "json") -> List[Dict[str, Any]]:
+        """
+        List all Velero backups and return structured data.
+        
+        Args:
+            output_format: Output format for velero command (default: "json")
+            
+        Returns:
+            List of backup information dictionaries
+            
+        Raises:
+            VeleroCommandError: If velero command fails after retries
+            VeleroCircuitBreakerError: If circuit breaker is open
+        """
+        self.logger.info("Listing all Velero backups")
+        
+        # Build get backups command with JSON output
+        command = VeleroCommand(self.config.binary_path, self.config.velero_namespace)
+        command.get_backups(output_format=output_format)
+        
+        try:
+            result = self._execute_command(command)
+            
+            if not result.success:
+                self.logger.error(f"Failed to list backups: {result.stderr}")
+                return []
+            
+            # Parse JSON output if requested
+            if output_format.lower() == "json":
+                import json
+                try:
+                    if result.stdout.strip():
+                        data = json.loads(result.stdout)
+                        # Velero JSON output structure: {"items": [...]}
+                        if isinstance(data, dict) and "items" in data:
+                            return data["items"]
+                        elif isinstance(data, list):
+                            return data
+                        else:
+                            self.logger.warning(f"Unexpected JSON structure in backup list: {type(data)}")
+                            return []
+                    else:
+                        # Empty output means no backups
+                        return []
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse JSON output from velero: {e}")
+                    return []
+            else:
+                # For non-JSON formats, return raw output as single item
+                return [{"raw_output": result.stdout}] if result.stdout.strip() else []
+                
+        except (VeleroCommandError, VeleroCircuitBreakerError) as e:
+            self.logger.error(f"Error listing backups: {e}")
+            # Return empty list instead of raising - let UI handle the error display
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error listing backups: {e}")
+            return []
+    
+    def get_backup_status(self, backup_name: str) -> str:
+        """
+        Get the status of a specific Velero backup.
+        
+        Args:
+            backup_name: Name of the backup to check
+            
+        Returns:
+            Status string (e.g., "Completed", "InProgress", "Failed", "NotFound")
+        """
+        self.logger.info(f"Getting status for backup: {backup_name}")
+        
+        try:
+            # Get all backups and find the specific one
+            backups = self.list_backups()
+            
+            for backup in backups:
+                # Check both 'name' and 'metadata.name' fields for backup name
+                backup_id = backup.get("metadata", {}).get("name") or backup.get("name")
+                
+                if backup_id == backup_name:
+                    # Extract status from backup object
+                    status = backup.get("status", {})
+                    if isinstance(status, dict):
+                        phase = status.get("phase", "Unknown")
+                        return phase
+                    elif isinstance(status, str):
+                        return status
+                    else:
+                        return "Unknown"
+            
+            # Backup not found
+            return "NotFound"
+            
+        except Exception as e:
+            self.logger.error(f"Error getting backup status for '{backup_name}': {e}")
+            return "Error"
+    
     def get_current_user(self) -> Optional[UserInfo]:
         """Get current authenticated user from Kubernetes client."""
         return self.k8s_client.get_current_user()
