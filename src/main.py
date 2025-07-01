@@ -16,6 +16,9 @@ from auth import (
 from k8s_client import KubernetesClient, K8sClientConfig
 from namespace_manager import NamespaceManager, NamespaceManagerConfig, NamespaceInfo, SortOrder
 
+# Import UI components
+from restore_ui import display_restore_ui
+
 st.set_page_config(
     page_title="Velero Manager",
     page_icon="🔄",
@@ -346,16 +349,26 @@ def show_main_interface(user):
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("🔄 Restore Section")
-        
-        # Check if user can perform restore operations
-        if require_groups(["admin", "backup-admin", "restore-admin"], user):
-            st.info("You have permission to perform restore operations.")
-            if st.button("View Restore History", disabled=True):
-                st.info("Restore functionality will be available once Velero integration is complete")
+        # Display restore UI component with BackupManager integration
+        if namespace_manager and st.session_state.get('selected_namespace'):
+            # Get the k8s_client from namespace_manager for restore_ui
+            k8s_client = namespace_manager.k8s_client
+            
+            # Display the restore UI component
+            display_restore_ui(
+                selected_namespace=st.session_state.selected_namespace,
+                k8s_client=k8s_client,
+                user_permissions=user.groups if user.groups else []
+            )
         else:
-            st.warning("You don't have permission to perform restore operations.")
-            st.caption("Required groups: admin, backup-admin, or restore-admin")
+            # Fallback when namespace or client not available
+            st.subheader("🔄 Restore Section")
+            if not namespace_manager:
+                st.error("❌ Kubernetes client not available")
+                st.caption("Unable to connect to Kubernetes API. Please check authentication.")
+            elif not st.session_state.get('selected_namespace'):
+                st.info("📁 Please select a namespace to view available backups")
+                st.caption("Use the namespace dropdown above to select a namespace.")
     
     with col2:
         st.subheader("💾 Backup Section")
