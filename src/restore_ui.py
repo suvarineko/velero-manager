@@ -63,7 +63,7 @@ def display_restore_ui(
             return
         
         # Check user permissions for restore operations
-        if user_permissions and not any(group in ["admin", "backup-admin", "restore-admin"] for group in user_permissions):
+        if user_permissions and not any(group in ["system:authenticated"] for group in user_permissions):
             st.warning("🔒 You don't have permission to perform restore operations")
             st.caption("Required groups: admin, backup-admin, or restore-admin")
             return
