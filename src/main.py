@@ -192,20 +192,8 @@ def display_namespace_resources(namespace_manager: NamespaceManager, namespace: 
         non_empty_kinds = len([k for k, v in kind_counts.items() if v])
         st.caption(f"Total: {total_resources} resources across {non_empty_kinds} resource types")
         
-        # Display each Kind with its resources in expandable sections
-        for kind in sorted(kind_counts.keys()):
-            resource_list = kind_counts[kind]
-            
-            # Only show Kinds that have resources
-            if resource_list:
-                with st.expander(f"📋 {kind} ({len(resource_list)})", expanded=False):
-                    # Sort resources by name for consistent display
-                    sorted_resources = sorted(resource_list, key=lambda x: x.get('name', ''))
-                    
-                    # Display resource names
-                    for resource in sorted_resources:
-                        resource_name = resource.get('name', 'Unknown')
-                        st.text(f"• {resource_name}")
+        # Display custom HTML/CSS tree component
+        _display_resource_tree_html(kind_counts)
     
     except Exception as e:
         # Handle permission errors gracefully
@@ -264,6 +252,172 @@ def _extract_kind_from_resource_type(resource_type: str) -> str:
         
     except Exception:
         return resource_type  # Fallback to original if parsing fails
+
+
+def _display_resource_tree_html(kind_counts: dict):
+    """
+    Display resources using a custom HTML/CSS tree component.
+    
+    Args:
+        kind_counts: Dictionary of Kind -> list of resources
+    """
+    # Generate unique ID for this tree instance
+    import uuid
+    tree_id = str(uuid.uuid4())[:8]
+    
+    # Build HTML structure
+    html_content = f"""
+    <style>
+    .resource-tree-{tree_id} {{
+        font-family: "Source Sans Pro", sans-serif;
+        margin: 10px 0;
+        border: 1px solid #e6e6e6;
+        border-radius: 6px;
+        background: #fafafa;
+        padding: 5px;
+    }}
+    
+    .tree-node-{tree_id} {{
+        margin: 2px 0;
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid #e0e0e0;
+        background: white;
+    }}
+    
+    .tree-header-{tree_id} {{
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        cursor: pointer;
+        background: linear-gradient(90deg, #f8f9fa 0%, #e9ecef 100%);
+        border-bottom: 1px solid #e0e0e0;
+        user-select: none;
+        transition: background-color 0.2s ease;
+    }}
+    
+    .tree-header-{tree_id}:hover {{
+        background: linear-gradient(90deg, #e9ecef 0%, #dee2e6 100%);
+    }}
+    
+    .tree-icon-{tree_id} {{
+        margin-right: 8px;
+        font-size: 12px;
+        transition: transform 0.2s ease;
+        color: #666;
+    }}
+    
+    .tree-icon-{tree_id}.expanded {{
+        transform: rotate(90deg);
+    }}
+    
+    .tree-title-{tree_id} {{
+        font-weight: 600;
+        color: #262730;
+        font-size: 14px;
+    }}
+    
+    .tree-count-{tree_id} {{
+        margin-left: auto;
+        background: #007acc;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 500;
+    }}
+    
+    .tree-content-{tree_id} {{
+        display: none;
+        padding: 8px 16px 12px 16px;
+        background: #fdfdfd;
+        border-top: 1px solid #f0f0f0;
+    }}
+    
+    .tree-content-{tree_id}.expanded {{
+        display: block;
+    }}
+    
+    .resource-item-{tree_id} {{
+        padding: 3px 0;
+        color: #555;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+    }}
+    
+    .resource-item-{tree_id}:before {{
+        content: "•";
+        color: #007acc;
+        margin-right: 8px;
+        font-weight: bold;
+    }}
+    
+    .empty-message-{tree_id} {{
+        color: #888;
+        font-style: italic;
+        font-size: 13px;
+    }}
+    </style>
+    
+    <div class="resource-tree-{tree_id}">
+    """
+    
+    # Add each Kind as a tree node
+    for kind in sorted(kind_counts.keys()):
+        resource_list = kind_counts[kind]
+        
+        # Only show Kinds that have resources
+        if resource_list:
+            # Sort resources by name
+            sorted_resources = sorted(resource_list, key=lambda x: x.get('name', ''))
+            
+            html_content += f"""
+            <div class="tree-node-{tree_id}">
+                <div class="tree-header-{tree_id}" onclick="toggleNode_{tree_id}('{kind}')">
+                    <span class="tree-icon-{tree_id}" id="icon-{kind}-{tree_id}">▶</span>
+                    <span class="tree-title-{tree_id}">📋 {kind}</span>
+                    <span class="tree-count-{tree_id}">{len(resource_list)}</span>
+                </div>
+                <div class="tree-content-{tree_id}" id="content-{kind}-{tree_id}">
+            """
+            
+            # Add resource items
+            for resource in sorted_resources:
+                resource_name = resource.get('name', 'Unknown')
+                html_content += f'<div class="resource-item-{tree_id}">{resource_name}</div>'
+            
+            html_content += """
+                </div>
+            </div>
+            """
+    
+    if not any(kind_counts.values()):
+        html_content += f'<div class="empty-message-{tree_id}">No resources found in this namespace</div>'
+    
+    html_content += f"""
+    </div>
+    
+    <script>
+    function toggleNode_{tree_id}(kind) {{
+        const icon = document.getElementById('icon-' + kind + '-{tree_id}');
+        const content = document.getElementById('content-' + kind + '-{tree_id}');
+        
+        if (content.classList.contains('expanded')) {{
+            content.classList.remove('expanded');
+            icon.classList.remove('expanded');
+            icon.innerHTML = '▶';
+        }} else {{
+            content.classList.add('expanded');
+            icon.classList.add('expanded');
+            icon.innerHTML = '▼';
+        }}
+    }}
+    </script>
+    """
+    
+    # Display the HTML component
+    st.markdown(html_content, unsafe_allow_html=True)
 
 
 def main():
