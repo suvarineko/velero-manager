@@ -500,7 +500,7 @@ def show_main_interface(user):
         st.subheader("💾 Backup Section")
         
         # Check if user can perform backup operations  
-        if require_groups(["admin", "backup-admin"], user):
+        if require_groups(["system:authenticated"], user):
             st.info("You have permission to perform backup operations.")
             
             # Show resource tree for selected namespace
