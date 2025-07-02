@@ -140,6 +140,132 @@ def load_namespaces(namespace_manager: NamespaceManager, force_refresh: bool = F
         logging.error(error_msg)
         return [], error_msg
 
+
+def display_namespace_resources(namespace_manager: NamespaceManager, namespace: str):
+    """
+    Display a tree view of all resources in the selected namespace organized by Kind.
+    
+    Args:
+        namespace_manager: The NamespaceManager instance
+        namespace: The namespace to discover resources in
+    """
+    try:
+        # Get the k8s_client from namespace_manager
+        k8s_client = namespace_manager.k8s_client
+        
+        # Show loading state while discovering resources
+        with st.spinner(f"Discovering resources in namespace '{namespace}'..."):
+            # Discover all resources in the namespace (use cache=False for completeness)
+            resources = k8s_client.discover_namespace_resources(
+                namespace=namespace,
+                use_cache=True,  # Use cache for better performance
+                include_crds=True  # Include custom resources
+            )
+        
+        # Check if namespace is empty
+        if not resources:
+            st.info(f"📁 Namespace '{namespace}' doesn't contain any resources")
+            st.caption("This namespace appears to be empty or you may not have permissions to view resources.")
+            return
+        
+        # Display resources organized by Kind
+        st.markdown("#### 📦 Available Resources")
+        st.caption(f"Resources found in namespace '{namespace}' organized by type")
+        
+        # Group resources by Kind and count them
+        total_resources = 0
+        kind_counts = {}
+        
+        for resource_type, resource_list in resources.items():
+            # Extract Kind from resource_type (e.g., "v1/pods" -> "Pod")
+            kind = _extract_kind_from_resource_type(resource_type)
+            
+            if kind not in kind_counts:
+                kind_counts[kind] = []
+            
+            if resource_list:  # Non-empty resource types
+                # Add all resources of this type to the kind
+                kind_counts[kind].extend(resource_list)
+                total_resources += len(resource_list)
+        
+        # Display total count (only count kinds with resources)
+        non_empty_kinds = len([k for k, v in kind_counts.items() if v])
+        st.caption(f"Total: {total_resources} resources across {non_empty_kinds} resource types")
+        
+        # Display each Kind with its resources in expandable sections
+        for kind in sorted(kind_counts.keys()):
+            resource_list = kind_counts[kind]
+            
+            # Only show Kinds that have resources
+            if resource_list:
+                with st.expander(f"📋 {kind} ({len(resource_list)})", expanded=False):
+                    # Sort resources by name for consistent display
+                    sorted_resources = sorted(resource_list, key=lambda x: x.get('name', ''))
+                    
+                    # Display resource names
+                    for resource in sorted_resources:
+                        resource_name = resource.get('name', 'Unknown')
+                        st.text(f"• {resource_name}")
+    
+    except Exception as e:
+        # Handle permission errors gracefully
+        error_str = str(e).lower()
+        if "403" in error_str or "forbidden" in error_str or "permission" in error_str:
+            st.warning(f"⚠️ Permission Error")
+            st.caption(f"You don't have sufficient permissions to view resources in namespace '{namespace}'")
+        else:
+            st.error(f"❌ Error discovering resources: {str(e)}")
+            st.caption("Please check your connection and permissions")
+
+
+def _extract_kind_from_resource_type(resource_type: str) -> str:
+    """
+    Extract Kubernetes Kind from resource type string.
+    
+    Args:
+        resource_type: Resource type like "v1/pods", "apps/v1/deployments"
+        
+    Returns:
+        str: The Kubernetes Kind like "Pod", "Deployment"
+    """
+    try:
+        # Handle different resource type formats
+        if '/' in resource_type:
+            # Extract the last part (resource name) and convert to Kind
+            resource_name = resource_type.split('/')[-1]
+        else:
+            resource_name = resource_type
+        
+        # Convert resource name to Kind (singular, capitalized)
+        kind_mapping = {
+            'pods': 'Pod',
+            'services': 'Service', 
+            'deployments': 'Deployment',
+            'replicasets': 'ReplicaSet',
+            'statefulsets': 'StatefulSet',
+            'daemonsets': 'DaemonSet',
+            'jobs': 'Job',
+            'cronjobs': 'CronJob',
+            'configmaps': 'ConfigMap',
+            'secrets': 'Secret',
+            'persistentvolumeclaims': 'PersistentVolumeClaim',
+            'serviceaccounts': 'ServiceAccount',
+            'endpoints': 'Endpoints',
+            'events': 'Event',
+            'ingresses': 'Ingress',
+            'networkpolicies': 'NetworkPolicy',
+            'roles': 'Role',
+            'rolebindings': 'RoleBinding',
+            'storageclasses': 'StorageClass'
+        }
+        
+        # Return mapped kind or capitalize the resource name
+        return kind_mapping.get(resource_name.lower(), resource_name.capitalize())
+        
+    except Exception:
+        return resource_type  # Fallback to original if parsing fails
+
+
 def main():
     try:
         st.title("🔄 Velero Manager")
@@ -376,6 +502,14 @@ def show_main_interface(user):
         # Check if user can perform backup operations  
         if require_groups(["admin", "backup-admin"], user):
             st.info("You have permission to perform backup operations.")
+            
+            # Show resource tree for selected namespace
+            if namespace_manager and st.session_state.get('selected_namespace'):
+                display_namespace_resources(namespace_manager, st.session_state.selected_namespace)
+            elif not st.session_state.get('selected_namespace'):
+                st.info("📁 Please select a namespace to view resources for backup")
+                st.caption("Use the namespace dropdown above to select a namespace.")
+            
             if st.button("Create Backup", disabled=True):
                 st.info("Backup functionality will be available once Velero integration is complete")
         else:

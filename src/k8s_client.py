@@ -1175,15 +1175,22 @@ class KubernetesClient:
             self.logger.error(error_msg)
             raise RuntimeError(error_msg) from e
     
+    @with_retry_and_circuit_breaker("discover_api_resources", critical=False)
     def discover_api_resources(self, use_cache: bool = True) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Discover all available API resources in the cluster.
+        Discover all available API resources in the cluster with detailed metadata.
         
         Args:
             use_cache: Whether to use cached results if available
             
         Returns:
-            Dict[str, List[Dict[str, Any]]]: API resources grouped by API version
+            Dict[str, List[Dict[str, Any]]]: API resources grouped by API version.
+            Each resource includes:
+            - name: Resource name (e.g., 'pods', 'services')
+            - namespaced: Boolean indicating if resource is namespaced vs cluster-scoped
+            - kind: Resource kind (e.g., 'Pod', 'Service')
+            - verbs: List of supported operations
+            - short_names: List of short aliases if available
             
         Raises:
             RuntimeError: If client is not authenticated or API call fails
@@ -1205,7 +1212,12 @@ class KubernetesClient:
             for version in api_versions.get('versions', []):
                 try:
                     version_resources = self.api_client.call_api(f'/api/{version}', 'GET')[0]
-                    resources[f'api/{version}'] = version_resources.get('resources', [])
+                    processed_resources = self._process_api_resources(
+                        version_resources.get('resources', []), 
+                        f'api/{version}'
+                    )
+                    if processed_resources:
+                        resources[f'api/{version}'] = processed_resources
                 except Exception as e:
                     self.logger.warning(f"Failed to get resources for api/{version}: {e}")
             
@@ -1218,7 +1230,12 @@ class KubernetesClient:
                     
                     try:
                         version_resources = self.api_client.call_api(f'/apis/{api_version}', 'GET')[0]
-                        resources[f'apis/{api_version}'] = version_resources.get('resources', [])
+                        processed_resources = self._process_api_resources(
+                            version_resources.get('resources', []), 
+                            f'apis/{api_version}'
+                        )
+                        if processed_resources:
+                            resources[f'apis/{api_version}'] = processed_resources
                     except Exception as e:
                         self.logger.warning(f"Failed to get resources for apis/{api_version}: {e}")
             
@@ -1226,13 +1243,55 @@ class KubernetesClient:
             self._api_resources_cache = resources
             self._cache_timestamp = time.time()
             
-            self.logger.debug(f"Discovered {len(resources)} API versions")
+            total_resources = sum(len(res_list) for res_list in resources.values())
+            self.logger.debug(f"Discovered {total_resources} resources across {len(resources)} API versions")
             return resources
             
         except Exception as e:
             error_msg = f"Failed to discover API resources: {e}"
             self.logger.error(error_msg)
             raise RuntimeError(error_msg) from e
+    
+    def _process_api_resources(self, raw_resources: List[Dict[str, Any]], api_version: str) -> List[Dict[str, Any]]:
+        """
+        Process raw API resource data and extract metadata.
+        
+        Args:
+            raw_resources: Raw resource list from Kubernetes API
+            api_version: API version string for context
+            
+        Returns:
+            List[Dict[str, Any]]: Processed resources with extracted metadata
+        """
+        processed_resources = []
+        
+        for resource in raw_resources:
+            try:
+                # Skip subresources (those with '/' in name like 'pods/status')
+                resource_name = resource.get('name', '')
+                if '/' in resource_name:
+                    continue
+                    
+                # Extract resource metadata
+                processed_resource = {
+                    'name': resource_name,
+                    'namespaced': resource.get('namespaced', False),
+                    'kind': resource.get('kind', ''),
+                    'verbs': resource.get('verbs', []),
+                    'short_names': resource.get('shortNames', []),
+                    'api_version': api_version,
+                    'categories': resource.get('categories', [])
+                }
+                
+                # Only include resources with valid names
+                if resource_name:
+                    processed_resources.append(processed_resource)
+                    
+            except Exception as e:
+                self.logger.debug(f"Failed to process resource in {api_version}: {e}")
+                continue
+        
+        return processed_resources
     
     @with_retry_and_circuit_breaker("can_i", critical=True)
     def can_i(self, verb: str, resource: str, namespace: Optional[str] = None, 
