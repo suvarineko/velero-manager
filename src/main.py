@@ -261,163 +261,173 @@ def _display_resource_tree_html(kind_counts: dict):
     Args:
         kind_counts: Dictionary of Kind -> list of resources
     """
-    # Generate unique ID for this tree instance
-    import uuid
-    tree_id = str(uuid.uuid4())[:8]
+    import streamlit.components.v1 as components
     
-    # Build HTML structure
+    # Build HTML structure with embedded CSS and JavaScript
     html_content = f"""
-    <style>
-    .resource-tree-{tree_id} {{
-        font-family: "Source Sans Pro", sans-serif;
-        margin: 10px 0;
-        border: 1px solid #e6e6e6;
-        border-radius: 6px;
-        background: #fafafa;
-        padding: 5px;
-    }}
-    
-    .tree-node-{tree_id} {{
-        margin: 2px 0;
-        border-radius: 4px;
-        overflow: hidden;
-        border: 1px solid #e0e0e0;
-        background: white;
-    }}
-    
-    .tree-header-{tree_id} {{
-        display: flex;
-        align-items: center;
-        padding: 8px 12px;
-        cursor: pointer;
-        background: linear-gradient(90deg, #f8f9fa 0%, #e9ecef 100%);
-        border-bottom: 1px solid #e0e0e0;
-        user-select: none;
-        transition: background-color 0.2s ease;
-    }}
-    
-    .tree-header-{tree_id}:hover {{
-        background: linear-gradient(90deg, #e9ecef 0%, #dee2e6 100%);
-    }}
-    
-    .tree-icon-{tree_id} {{
-        margin-right: 8px;
-        font-size: 12px;
-        transition: transform 0.2s ease;
-        color: #666;
-    }}
-    
-    .tree-icon-{tree_id}.expanded {{
-        transform: rotate(90deg);
-    }}
-    
-    .tree-title-{tree_id} {{
-        font-weight: 600;
-        color: #262730;
-        font-size: 14px;
-    }}
-    
-    .tree-count-{tree_id} {{
-        margin-left: auto;
-        background: #007acc;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 12px;
-        font-weight: 500;
-    }}
-    
-    .tree-content-{tree_id} {{
-        display: none;
-        padding: 8px 16px 12px 16px;
-        background: #fdfdfd;
-        border-top: 1px solid #f0f0f0;
-    }}
-    
-    .tree-content-{tree_id}.expanded {{
-        display: block;
-    }}
-    
-    .resource-item-{tree_id} {{
-        padding: 3px 0;
-        color: #555;
-        font-size: 13px;
-        display: flex;
-        align-items: center;
-    }}
-    
-    .resource-item-{tree_id}:before {{
-        content: "•";
-        color: #007acc;
-        margin-right: 8px;
-        font-weight: bold;
-    }}
-    
-    .empty-message-{tree_id} {{
-        color: #888;
-        font-style: italic;
-        font-size: 13px;
-    }}
-    </style>
-    
-    <div class="resource-tree-{tree_id}">
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+        .resource-tree {{
+            font-family: "Source Sans Pro", sans-serif;
+            margin: 10px 0;
+            border: 1px solid #e6e6e6;
+            border-radius: 6px;
+            background: #fafafa;
+            padding: 5px;
+        }}
+        
+        .tree-node {{
+            margin: 2px 0;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #e0e0e0;
+            background: white;
+        }}
+        
+        .tree-header {{
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            cursor: pointer;
+            background: linear-gradient(90deg, #f8f9fa 0%, #e9ecef 100%);
+            border-bottom: 1px solid #e0e0e0;
+            user-select: none;
+            transition: background-color 0.2s ease;
+        }}
+        
+        .tree-header:hover {{
+            background: linear-gradient(90deg, #e9ecef 0%, #dee2e6 100%);
+        }}
+        
+        .tree-icon {{
+            margin-right: 8px;
+            font-size: 12px;
+            transition: transform 0.2s ease;
+            color: #666;
+        }}
+        
+        .tree-icon.expanded {{
+            transform: rotate(90deg);
+        }}
+        
+        .tree-title {{
+            font-weight: 600;
+            color: #262730;
+            font-size: 14px;
+        }}
+        
+        .tree-count {{
+            margin-left: auto;
+            background: #007acc;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        
+        .tree-content {{
+            display: none;
+            padding: 8px 16px 12px 16px;
+            background: #fdfdfd;
+            border-top: 1px solid #f0f0f0;
+        }}
+        
+        .tree-content.expanded {{
+            display: block;
+        }}
+        
+        .resource-item {{
+            padding: 3px 0;
+            color: #555;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+        }}
+        
+        .resource-item:before {{
+            content: "•";
+            color: #007acc;
+            margin-right: 8px;
+            font-weight: bold;
+        }}
+        
+        .empty-message {{
+            color: #888;
+            font-style: italic;
+            font-size: 13px;
+            padding: 20px;
+            text-align: center;
+        }}
+        </style>
+    </head>
+    <body>
+        <div class="resource-tree">
     """
     
     # Add each Kind as a tree node
-    for kind in sorted(kind_counts.keys()):
-        resource_list = kind_counts[kind]
-        
-        # Only show Kinds that have resources
-        if resource_list:
-            # Sort resources by name
-            sorted_resources = sorted(resource_list, key=lambda x: x.get('name', ''))
-            
-            html_content += f"""
-            <div class="tree-node-{tree_id}">
-                <div class="tree-header-{tree_id}" onclick="toggleNode_{tree_id}('{kind}')">
-                    <span class="tree-icon-{tree_id}" id="icon-{kind}-{tree_id}">▶</span>
-                    <span class="tree-title-{tree_id}">📋 {kind}</span>
-                    <span class="tree-count-{tree_id}">{len(resource_list)}</span>
-                </div>
-                <div class="tree-content-{tree_id}" id="content-{kind}-{tree_id}">
-            """
-            
-            # Add resource items
-            for resource in sorted_resources:
-                resource_name = resource.get('name', 'Unknown')
-                html_content += f'<div class="resource-item-{tree_id}">{resource_name}</div>'
-            
-            html_content += """
-                </div>
-            </div>
-            """
-    
     if not any(kind_counts.values()):
-        html_content += f'<div class="empty-message-{tree_id}">No resources found in this namespace</div>'
+        html_content += '<div class="empty-message">No resources found in this namespace</div>'
+    else:
+        for kind in sorted(kind_counts.keys()):
+            resource_list = kind_counts[kind]
+            
+            # Only show Kinds that have resources
+            if resource_list:
+                # Sort resources by name
+                sorted_resources = sorted(resource_list, key=lambda x: x.get('name', ''))
+                # Sanitize kind name for use as ID (remove special characters)
+                kind_id = ''.join(c for c in kind if c.isalnum())
+                
+                html_content += f"""
+                <div class="tree-node">
+                    <div class="tree-header" onclick="toggleNode('{kind_id}')">
+                        <span class="tree-icon" id="icon-{kind_id}">▶</span>
+                        <span class="tree-title">📋 {kind}</span>
+                        <span class="tree-count">{len(resource_list)}</span>
+                    </div>
+                    <div class="tree-content" id="content-{kind_id}">
+                """
+                
+                # Add resource items
+                for resource in sorted_resources:
+                    resource_name = resource.get('name', 'Unknown')
+                    # Escape HTML special characters
+                    resource_name = resource_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    html_content += f'<div class="resource-item">{resource_name}</div>'
+                
+                html_content += """
+                    </div>
+                </div>
+                """
     
-    html_content += f"""
-    </div>
-    
-    <script>
-    function toggleNode_{tree_id}(kind) {{
-        const icon = document.getElementById('icon-' + kind + '-{tree_id}');
-        const content = document.getElementById('content-' + kind + '-{tree_id}');
+    html_content += """
+        </div>
         
-        if (content.classList.contains('expanded')) {{
-            content.classList.remove('expanded');
-            icon.classList.remove('expanded');
-            icon.innerHTML = '▶';
-        }} else {{
-            content.classList.add('expanded');
-            icon.classList.add('expanded');
-            icon.innerHTML = '▼';
-        }}
-    }}
-    </script>
+        <script>
+        function toggleNode(kindId) {
+            const icon = document.getElementById('icon-' + kindId);
+            const content = document.getElementById('content-' + kindId);
+            
+            if (content.classList.contains('expanded')) {
+                content.classList.remove('expanded');
+                icon.classList.remove('expanded');
+                icon.innerHTML = '▶';
+            } else {
+                content.classList.add('expanded');
+                icon.classList.add('expanded');
+                icon.innerHTML = '▼';
+            }
+        }
+        </script>
+    </body>
+    </html>
     """
     
-    # Display the HTML component
-    st.markdown(html_content, unsafe_allow_html=True)
+    # Display using Streamlit components
+    components.html(html_content, height=400, scrolling=True)
 
 
 def main():
