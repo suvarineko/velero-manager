@@ -9,9 +9,11 @@ Author: Generated for Velero Manager
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Union
-from datetime import datetime
+import asyncio
+from typing import List, Dict, Any, Optional, Union, AsyncIterator
+from datetime import datetime, timezone, timedelta
 import pandas as pd
+import re
 
 try:
     from .velero_client import VeleroClient, VeleroClientConfig
@@ -419,6 +421,93 @@ class BackupManager(VeleroClient):
         except Exception as e:
             self.logger.error(f"Error formatting summary: {e}")
             return f"Error formatting summary: {e}"
+    
+    async def poll_backup_status(self, backup_name: str, 
+                                timeout: int = 1800, 
+                                poll_interval: int = 5) -> AsyncIterator[str]:
+        """
+        Poll backup status asynchronously until completion or timeout.
+        
+        Args:
+            backup_name: Name of the backup to monitor
+            timeout: Maximum time to poll in seconds (default: 1800s = 30 minutes)
+            poll_interval: Interval between polls in seconds (default: 5 seconds)
+            
+        Yields:
+            str: Current backup status ("Pending", "InProgress", "Completed", "Failed", etc.)
+            
+        Raises:
+            asyncio.TimeoutError: If polling exceeds timeout duration
+            Exception: If backup status checking fails repeatedly
+        """
+        self.logger.info(f"Starting status polling for backup: {backup_name}")
+        self.logger.debug(f"Polling configuration - timeout: {timeout}s, interval: {poll_interval}s")
+        
+        start_time = datetime.now()
+        last_status = None
+        error_count = 0
+        max_consecutive_errors = 5
+        
+        try:
+            while True:
+                # Check timeout
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                if elapsed_time >= timeout:
+                    self.logger.warning(f"Polling timeout reached for backup '{backup_name}' after {elapsed_time:.1f}s")
+                    raise asyncio.TimeoutError(f"Backup status polling timed out after {timeout} seconds")
+                
+                try:
+                    # Get current backup status
+                    current_status = self.get_backup_status(backup_name, raise_on_error=False)
+                    
+                    # Reset error count on successful status check
+                    error_count = 0
+                    
+                    # Log status changes
+                    if current_status != last_status:
+                        self.logger.info(f"Backup '{backup_name}' status changed: {last_status} -> {current_status}")
+                        last_status = current_status
+                    
+                    # Yield current status
+                    yield current_status
+                    
+                    # Check for terminal states
+                    if current_status.lower() in ["completed", "failed", "partiallyfailed"]:
+                        self.logger.info(f"Backup '{backup_name}' reached terminal state: {current_status}")
+                        break
+                    
+                    # Handle error states
+                    if current_status.lower() in ["error", "notfound"]:
+                        self.logger.warning(f"Backup '{backup_name}' in error state: {current_status}")
+                        # Continue polling for a few more iterations in case it's transient
+                        error_count += 1
+                        if error_count >= 3:
+                            self.logger.error(f"Backup '{backup_name}' persistently in error state: {current_status}")
+                            break
+                    
+                except Exception as e:
+                    error_count += 1
+                    self.logger.warning(f"Error checking backup status (attempt {error_count}/{max_consecutive_errors}): {e}")
+                    
+                    if error_count >= max_consecutive_errors:
+                        self.logger.error(f"Too many consecutive errors checking backup status for '{backup_name}'")
+                        raise Exception(f"Failed to check backup status after {max_consecutive_errors} attempts: {e}")
+                    
+                    # Yield error status and continue
+                    yield "Error"
+                
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+                
+        except asyncio.TimeoutError:
+            # Re-raise timeout errors
+            raise
+        except Exception as e:
+            self.logger.error(f"Polling failed for backup '{backup_name}': {e}")
+            raise
+        finally:
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            self.logger.info(f"Finished polling backup '{backup_name}' after {elapsed_time:.1f}s")
 
 
 def create_backup_manager(k8s_client, config: Optional[VeleroClientConfig] = None) -> BackupManager:
