@@ -845,19 +845,22 @@ users:
         if "name" not in metadata:
             raise VeleroParsingError("Restore metadata missing 'name' field")
     
-    def create_backup(self, name: str, include_namespaces: Optional[List[str]] = None, 
-                     ttl: Optional[str] = None, **kwargs) -> VeleroCommandResult:
+    async def create_backup(self, name: str, include_namespaces: Optional[List[str]] = None, 
+                           ttl: Optional[str] = None, labels: Optional[Dict[str, str]] = None, 
+                           username: Optional[str] = None, **kwargs) -> str:
         """
-        Create a Velero backup.
+        Create a Velero backup with proper labeling.
         
         Args:
             name: Name of the backup
             include_namespaces: List of namespaces to include in backup
             ttl: Time to live for the backup (defaults to config value)
+            labels: Additional labels to apply to the backup
+            username: Username of the user triggering the backup (for labeling)
             **kwargs: Additional backup options
             
         Returns:
-            VeleroCommandResult with backup operation details
+            str: Backup name for tracking
         """
         self.logger.info(f"Creating backup: {name}")
         
@@ -874,7 +877,19 @@ users:
             **kwargs
         )
         
-        return self._execute_command(command)
+        # Execute command asynchronously
+        import asyncio
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, self._execute_command, command
+        )
+        
+        if not result.success:
+            error_msg = f"Backup creation failed: {result.stderr}"
+            self.logger.error(error_msg)
+            raise VeleroCommandError(error_msg, result.exit_code, result.stderr)
+        
+        self.logger.info(f"Backup '{name}' initiated successfully")
+        return name
     
     def create_restore(self, backup_name: str, restore_name: Optional[str] = None,
                       include_namespaces: Optional[List[str]] = None,
