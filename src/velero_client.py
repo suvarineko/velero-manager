@@ -331,7 +331,7 @@ class VeleroCommand:
         
         Args:
             name: Name of the backup
-            **kwargs: Additional backup options (ttl, include_namespaces, etc.)
+            **kwargs: Additional backup options (ttl, include_namespaces, labels, etc.)
         """
         self.args.extend(["backup", "create", name])
         self.args.extend(["--namespace", self.namespace])
@@ -346,6 +346,16 @@ class VeleroCommand:
             self.args.extend(["--include-namespaces", namespaces])
         if "storage_location" in kwargs:
             self.args.extend(["--storage-location", kwargs["storage_location"]])
+        if "labels" in kwargs:
+            labels = kwargs["labels"]
+            if isinstance(labels, dict):
+                # Convert dict to key=value pairs
+                for key, value in labels.items():
+                    self.args.extend(["--labels", f"{key}={value}"])
+            elif isinstance(labels, list):
+                # Assume list of key=value strings
+                for label in labels:
+                    self.args.extend(["--labels", label])
         
         return self
     
@@ -867,6 +877,28 @@ users:
         # Use default TTL if not specified
         backup_ttl = ttl or self.config.default_backup_ttl
         
+        # Generate backup labels (basic set: creator, namespace, timestamp)
+        backup_labels = {}
+        
+        # Add creator label if username provided
+        if username:
+            backup_labels["velero.io/created-by"] = username
+            backup_labels["creator"] = username
+        
+        # Add namespace label if single namespace backup
+        if include_namespaces and len(include_namespaces) == 1:
+            backup_labels["backup-namespace"] = include_namespaces[0]
+        
+        # Add timestamp label
+        from datetime import datetime, timezone, timedelta
+        utc_plus_3 = timezone(timedelta(hours=3))
+        timestamp = datetime.now(utc_plus_3).strftime('%Y-%m-%d-%H%M%S')
+        backup_labels["backup-timestamp"] = timestamp
+        
+        # Merge with additional labels if provided
+        if labels:
+            backup_labels.update(labels)
+        
         # Build backup command
         command = VeleroCommand(self.config.binary_path, self.config.velero_namespace)
         command.backup(
@@ -874,6 +906,7 @@ users:
             ttl=backup_ttl,
             include_namespaces=include_namespaces,
             storage_location=self.config.backup_storage_location,
+            labels=backup_labels,
             **kwargs
         )
         
