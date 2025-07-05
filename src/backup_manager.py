@@ -44,6 +44,100 @@ class BackupManager(VeleroClient):
         self.logger = logging.getLogger(__name__)
         self.logger.debug("BackupManager initialized")
     
+    def generate_backup_name(self, namespace: str, username: str) -> str:
+        """
+        Generate a standardized backup name based on namespace, timestamp, and username.
+        
+        Format: {namespace}-{timestamp}-{username}
+        Timestamp format: YYYY-MM-DD-HHMMSS (UTC+3 timezone)
+        
+        Args:
+            namespace: Kubernetes namespace name
+            username: Username of the user triggering the backup creation
+            
+        Returns:
+            str: Generated backup name that meets Velero naming requirements
+            
+        Raises:
+            ValueError: If generated name doesn't meet Velero naming requirements
+        """
+        try:
+            # Get current timestamp in UTC+3 timezone
+            utc_plus_3 = timezone(timedelta(hours=3))
+            now = datetime.now(utc_plus_3)
+            timestamp = now.strftime('%Y-%m-%d-%H%M%S')
+            
+            # Sanitize inputs (convert to lowercase)
+            namespace_clean = namespace.lower()
+            username_clean = username.lower()
+            
+            # Generate backup name
+            backup_name = f"{namespace_clean}-{timestamp}-{username_clean}"
+            
+            # Validate the generated name meets Velero requirements
+            self._validate_backup_name(backup_name)
+            
+            self.logger.debug(f"Generated backup name: {backup_name}")
+            return backup_name
+            
+        except Exception as e:
+            error_msg = f"Failed to generate backup name for namespace '{namespace}' and user '{username}': {e}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg) from e
+    
+    def _validate_backup_name(self, backup_name: str) -> None:
+        """
+        Validate that the backup name meets Velero's naming requirements.
+        
+        Velero backup names must:
+        - Be lowercase
+        - Start and end with alphanumeric characters
+        - Contain only lowercase alphanumeric characters, hyphens, and dots
+        - Be 253 characters or less
+        
+        Args:
+            backup_name: The backup name to validate
+            
+        Raises:
+            ValueError: If the backup name doesn't meet requirements
+        """
+        try:
+            # Check length requirement (253 characters max)
+            if len(backup_name) > 253:
+                raise ValueError(f"Backup name exceeds 253 character limit: {len(backup_name)} characters")
+            
+            # Check if name is empty
+            if not backup_name:
+                raise ValueError("Backup name cannot be empty")
+            
+            # Check start and end characters (must be alphanumeric)
+            if not (backup_name[0].isalnum() and backup_name[-1].isalnum()):
+                raise ValueError("Backup name must start and end with alphanumeric characters")
+            
+            # Check allowed characters (lowercase alphanumeric, hyphens, dots)
+            # Velero follows Kubernetes naming conventions
+            valid_pattern = re.compile(r'^[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?$')
+            if not valid_pattern.match(backup_name):
+                raise ValueError("Backup name contains invalid characters. Only lowercase letters, numbers, hyphens, and dots are allowed")
+            
+            # Additional check: ensure no consecutive dots or hyphens at start/end
+            if '..' in backup_name:
+                raise ValueError("Backup name cannot contain consecutive dots")
+            
+            # Check for valid DNS subdomain name (Kubernetes requirement)
+            if backup_name.startswith('-') or backup_name.endswith('-'):
+                raise ValueError("Backup name cannot start or end with a hyphen")
+            
+            if backup_name.startswith('.') or backup_name.endswith('.'):
+                raise ValueError("Backup name cannot start or end with a dot")
+            
+            self.logger.debug(f"Backup name validation passed: {backup_name}")
+            
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Unexpected error during backup name validation: {e}") from e
+    
     def get_formatted_backups(
         self, 
         namespace: Optional[str] = None,
