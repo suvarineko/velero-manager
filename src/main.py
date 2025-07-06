@@ -13,7 +13,7 @@ from auth import (
 )
 
 # Import Kubernetes and namespace management
-from k8s_client import KubernetesClient, K8sClientConfig
+from k8s_client import KubernetesClient, K8sClientConfig, get_k8s_client
 from namespace_manager import NamespaceManager, NamespaceManagerConfig, NamespaceInfo, SortOrder
 
 # Import UI components
@@ -661,24 +661,30 @@ def show_main_interface(user):
                 st.caption("Use the namespace dropdown above to select a namespace.")
     
     with col2:
-        st.subheader("💾 Backup Section")
-        
-        # Check if user can perform backup operations  
-        if require_groups(["system:authenticated"], user):
-            st.info("You have permission to perform backup operations.")
+        # Check if backup is in progress and show progress UI
+        if st.session_state.get('backup_in_progress', False):
+            from backup_ui import display_backup_progress_ui
+            from backup_manager import BackupManager
             
-            # Show resource tree for selected namespace
-            if namespace_manager and st.session_state.get('selected_namespace'):
-                display_namespace_resources(namespace_manager, st.session_state.selected_namespace)
-            elif not st.session_state.get('selected_namespace'):
-                st.info("📁 Please select a namespace to view resources for backup")
-                st.caption("Use the namespace dropdown above to select a namespace.")
-            
-            if st.button("Create Backup", disabled=True):
-                st.info("Backup functionality will be available once Velero integration is complete")
+            # Get backup manager
+            k8s_client = get_k8s_client()
+            if k8s_client and k8s_client.is_authenticated():
+                backup_manager = BackupManager(k8s_client)
+                backup_namespace = st.session_state.get('backup_namespace')
+                
+                if backup_namespace:
+                    display_backup_progress_ui(backup_manager, backup_namespace, user)
+                else:
+                    st.error("No backup namespace specified")
+                    st.session_state.backup_in_progress = False
+            else:
+                st.error("Kubernetes client not available for backup")
+                st.session_state.backup_in_progress = False
         else:
-            st.warning("You don't have permission to perform backup operations.")
-            st.caption("Required groups: admin or backup-admin")
+            # Show normal backup section
+            from backup_ui import display_backup_section_with_progress
+            st.subheader("💾 Backup Section")
+            display_backup_section_with_progress(namespace_manager, user)
     
     # Show development options if in dev mode
     if os.getenv('DEV_MODE', '').lower() == 'true':
